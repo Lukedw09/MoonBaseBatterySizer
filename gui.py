@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import copy
+import queue
+import re
 import sys
+import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from gui_logic import (
     EXAMPLE_CFG,
@@ -31,9 +34,9 @@ except ImportError:  # pragma: no cover - headless CI may lack tkinter
     tk = None  # type: ignore[misc, assignment]
     filedialog = messagebox = ttk = None  # type: ignore[misc, assignment]
 
-# Left tuning column: label (28 chars) + Scale trough + owner caption — must fit inside paned min width.
 TUNING_PANEL_MIN_WIDTH = 560
 SCALE_LENGTH = 190
+AUTO_SIZING_DEBOUNCE_MS = 600
 
 GUI_FIELD_LABELS: Dict[str, str] = {
     "n_packs": "n_packs",
@@ -52,6 +55,43 @@ GUI_FIELD_LABELS: Dict[str, str] = {
     "panel_efficiency": "Panel η",
     "sun_incidence_cosine": "cos(incidence)",
 }
+
+CONTROL_SECTIONS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("Geometry & loads", ("n_packs", "primary_w", "t_dark_h")),
+    (
+        "Battery",
+        (
+            "specific_energy_wh_per_kg_low",
+            "specific_energy_wh_per_kg_high",
+            "pack_volumetric_energy_density_wh_per_m3",
+            "depth_of_discharge",
+            "efficiency",
+            "packaging_insulation_mass_factor",
+            "box_target_temperature_k",
+        ),
+    ),
+    ("Radiator", ("radiator_temperature_k", "radiator_emissivity")),
+    ("Wake panel", ("warm_up_h", "panel_efficiency", "sun_incidence_cosine")),
+)
+
+
+def program_config_path() -> Path:
+    """config.yaml beside this program (Luke's file when present)."""
+    return default_config_path()
+
+
+class _SnapshotControls(Mapping[str, Any]):
+    def __init__(self, values: Dict[str, Any]) -> None:
+        self._values = values
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __iter__(self):
+        return iter(self._values)
 
 
 def _horizontal_scale(
@@ -80,10 +120,45 @@ def _horizontal_scale(
     )
 
 
+def _apply_theme(root: tk.Tk) -> ttk.Style:
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"))
+    style.configure("Section.TLabelframe", padding=10)
+    style.configure("Section.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
+    style.configure("ResultsHeadline.TLabel", font=("Segoe UI", 11), padding=4)
+    style.configure("Status.TLabel", font=("Segoe UI", 9))
+    style.configure("Update.TLabel", font=("Segoe UI", 10, "italic"), foreground="#b45309")
+    style.configure("Primary.TButton", padding=(10, 4))
+    root.configure(bg=style.lookup("TFrame", "background"))
+    return style
+
+
+def _extract_result_headline(table_text: str) -> str:
+    lines: List[str] = []
+    for line in table_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.search(r"P_load|Q_internal|Q_loss|fleet|mass", stripped, re.I):
+            lines.append(stripped)
+        if len(lines) >= 5:
+            break
+    return "\n".join(lines)
+
+
 class SizerGUI:
-    def __init__(self, root: tk.Tk, *, config_path: Optional[Path] = None) -> None:
+    def __init__(
+        self, root: tk.Tk, *, config_path: Optional[Path] = None, auto_run_after_load: bool = True
+    ) -> None:
         self.root = root
         self.root.title("Moon Base Battery Sizer")
+        self.root.minsize(1100, 640)
+        _apply_theme(root)
+
         self.base_cfg: Optional[dict] = None
         self.loaded_path: Optional[Path] = None
         self.last_results = None
@@ -102,50 +177,77 @@ class SizerGUI:
         self._results_fresh = False
         self._controls_editable = True
         self._input_invalid = False
+        self._populating_cfg = False
+        self._sizing_active = False
+        self._sizing_pending = False
+        self._sizing_inflight = 0
+        self._sizing_generation = 0
+        self._debounce_after_id: Optional[str] = None
+        self._last_valid_results_text: Optional[str] = None
+        self._last_valid_headline: str = ""
+        self._sizing_queue: queue.Queue[Tuple[int, Tuple[str, Any]]] = queue.Queue()
+        self._auto_run_after_load = auto_run_after_load
 
-        top = ttk.Frame(root, padding=8)
+        top = ttk.Frame(root, padding=(12, 10, 12, 6))
         top.pack(fill=tk.X)
-        ttk.Label(top, text="Config YAML:").pack(side=tk.LEFT)
-        start_path = config_path if config_path is not None else default_config_path()
-        self.path_var = tk.StringVar(value=str(start_path))
-        ttk.Entry(top, textvariable=self.path_var, width=60).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
-        ttk.Button(top, text="Load config", command=self.load_config).pack(side=tk.LEFT)
-        self.loaded_label = ttk.Label(top, text="", font=("TkDefaultFont", 9, "italic"))
-        self.loaded_label.pack(side=tk.LEFT, padx=8)
+        ttk.Label(top, text="Config:", style="Header.TLabel").pack(side=tk.LEFT)
+        self.config_name_label = ttk.Label(top, text="—", font=("Segoe UI", 10, "bold"))
+        self.config_name_label.pack(side=tk.LEFT, padx=(8, 16))
+        ttk.Button(top, text="Browse…", command=self._browse_config).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="Open example…", command=self._load_example_config).pack(side=tk.LEFT, padx=4)
 
         paned = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        self._paned = paned
 
         left_outer = ttk.Frame(paned)
         self._tuning_pane = left_outer
         paned.add(left_outer, weight=0)
-        canvas = tk.Canvas(left_outer, highlightthickness=0)
-        scroll = ttk.Scrollbar(left_outer, orient=tk.VERTICAL, command=canvas.yview)
-        self.tuning_frame = ttk.Frame(canvas, padding=4)
-        self._tuning_canvas = canvas
 
-        def _on_tuning_frame_configure(_event: tk.Event) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _on_tuning_canvas_configure(event: tk.Event) -> None:
-            canvas.itemconfigure(self._tuning_canvas_window, width=max(event.width, 1))
-
-        self.tuning_frame.bind("<Configure>", _on_tuning_frame_configure)
-        self._tuning_canvas_window = canvas.create_window(
+        self._tuning_canvas = tk.Canvas(left_outer, highlightthickness=0, borderwidth=0)
+        scroll = ttk.Scrollbar(left_outer, orient=tk.VERTICAL, command=self._tuning_canvas.yview)
+        self.tuning_frame = ttk.Frame(self._tuning_canvas, padding=4)
+        self._tuning_canvas_window = self._tuning_canvas.create_window(
             (0, 0), window=self.tuning_frame, anchor="nw", width=TUNING_PANEL_MIN_WIDTH
         )
-        canvas.bind("<Configure>", _on_tuning_canvas_configure)
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self._paned = paned
 
-        right = ttk.Frame(paned, padding=4)
+        def _on_tuning_frame_configure(_event: tk.Event) -> None:
+            self._tuning_canvas.configure(scrollregion=self._tuning_canvas.bbox("all"))
+
+        def _on_tuning_canvas_configure(event: tk.Event) -> None:
+            self._tuning_canvas.itemconfigure(self._tuning_canvas_window, width=max(event.width, 1))
+
+        self.tuning_frame.bind("<Configure>", _on_tuning_frame_configure)
+        self._tuning_canvas.bind("<Configure>", _on_tuning_canvas_configure)
+        self._tuning_canvas.configure(yscrollcommand=scroll.set)
+        self._tuning_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._bind_tuning_mousewheel(self._tuning_canvas)
+        self._bind_tuning_mousewheel(self.tuning_frame)
+
+        right = ttk.Frame(paned, padding=8)
         paned.add(right, weight=2)
-        ttk.Label(right, text="Results").pack(anchor=tk.W)
-        text_wrap = ttk.Frame(right)
+
+        results_card = ttk.Labelframe(right, text="Results", style="Section.TLabelframe", padding=8)
+        results_card.pack(fill=tk.BOTH, expand=True)
+        self.update_banner = ttk.Label(results_card, text="", style="Update.TLabel")
+        self.update_banner.pack(anchor=tk.W)
+        self.results_headline = ttk.Label(
+            results_card, text="", style="ResultsHeadline.TLabel", justify=tk.LEFT, wraplength=520
+        )
+        self.results_headline.pack(anchor=tk.W, pady=(0, 6))
+        text_wrap = ttk.Frame(results_card)
         text_wrap.pack(fill=tk.BOTH, expand=True)
-        self.results_text = tk.Text(text_wrap, wrap=tk.WORD, state=tk.DISABLED, font=("Courier", 9))
+        self.results_text = tk.Text(
+            text_wrap,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            font=("Consolas", 9),
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=4,
+            pady=4,
+        )
         yscroll = ttk.Scrollbar(text_wrap, orient=tk.VERTICAL, command=self.results_text.yview)
         self.results_text.configure(yscrollcommand=yscroll.set)
         self.results_text.grid(row=0, column=0, sticky="nsew")
@@ -154,13 +256,17 @@ class SizerGUI:
         text_wrap.columnconfigure(0, weight=1)
 
         btn_row = ttk.Frame(right)
-        btn_row.pack(fill=tk.X, pady=6)
-        self.run_btn = ttk.Button(btn_row, text="Run sizing", command=self.run_sizing)
-        self.run_btn.pack(side=tk.LEFT, padx=4)
+        btn_row.pack(fill=tk.X, pady=(8, 0))
+        self.run_btn = ttk.Button(btn_row, text="Run sizing", style="Primary.TButton", command=self.run_sizing)
+        self.run_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.pdf_btn = ttk.Button(btn_row, text="Save PDF", command=self.save_pdf, state=tk.DISABLED)
         self.pdf_btn.pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_row, text="Load EXAMPLE config…", command=self._pick_example_config).pack(
-            side=tk.LEFT, padx=4
+
+        status = ttk.Frame(root, padding=(12, 4))
+        status.pack(fill=tk.X)
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(status, textvariable=self.status_var, style="Status.TLabel", anchor=tk.W).pack(
+            side=tk.LEFT, fill=tk.X, expand=True
         )
 
         self._readonly_scale_tag = "MoonBaseReadonlyScale"
@@ -181,8 +287,52 @@ class SizerGUI:
             root.bind_class(self._readonly_scale_tag, seq, lambda _e: "break")
 
         self._build_tuning_controls()
-        self.load_config()
+        start = config_path if config_path is not None else program_config_path()
+        self._load_config_path(start)
         self.root.after_idle(self._fit_window_to_content)
+
+    def _bind_tuning_mousewheel(self, widget: tk.Misc) -> None:
+        widget.bind("<Enter>", self._tuning_wheel_bind_active, add=True)
+        widget.bind("<Leave>", self._tuning_wheel_bind_inactive, add=True)
+
+    def _tuning_wheel_bind_active(self, _event: tk.Event) -> None:
+        self.root.bind_all("<MouseWheel>", self._on_tuning_wheel, add=True)
+        self.root.bind_all("<Button-4>", self._on_tuning_wheel, add=True)
+        self.root.bind_all("<Button-5>", self._on_tuning_wheel, add=True)
+
+    def _tuning_wheel_bind_inactive(self, _event: tk.Event) -> None:
+        self.root.unbind_all("<MouseWheel>")
+        self.root.unbind_all("<Button-4>")
+        self.root.unbind_all("<Button-5>")
+
+    def _on_tuning_wheel(self, event: tk.Event) -> str:
+        w = event.widget
+        while w is not None:
+            if isinstance(w, tk.Scale):
+                return self._scale_wheel_scrolls_canvas(event)
+            w = w.master
+        if event.delta:
+            delta = -1 if event.delta > 0 else 1
+        elif event.num == 4:
+            delta = -1
+        elif event.num == 5:
+            delta = 1
+        else:
+            return "break"
+        self._tuning_canvas.yview_scroll(delta, "units")
+        return "break"
+
+    def _scale_wheel_scrolls_canvas(self, event: tk.Event) -> str:
+        if event.delta:
+            delta = -1 if event.delta > 0 else 1
+        elif event.num == 4:
+            delta = -1
+        elif event.num == 5:
+            delta = 1
+        else:
+            return "break"
+        self._tuning_canvas.yview_scroll(delta, "units")
+        return "break"
 
     def _fit_window_to_content(self) -> None:
         self.root.update_idletasks()
@@ -190,33 +340,40 @@ class SizerGUI:
             self._paned.sashpos(0, TUNING_PANEL_MIN_WIDTH)
         except tk.TclError:
             pass
-        req_w = self.root.winfo_reqwidth()
-        req_h = self.root.winfo_reqheight()
-        margin_w, margin_h = 12, 12
-        w = max(req_w + margin_w, TUNING_PANEL_MIN_WIDTH + 440)
-        scroll_h = 0
-        bbox = self._tuning_canvas.bbox("all")
-        if bbox:
-            scroll_h = int(bbox[3] - bbox[1]) + self._tuning_canvas.winfo_rooty() - self.root.winfo_rooty() + 48
-        h = max(req_h + margin_h, scroll_h, 560)
-        self.root.minsize(w, h)
-        self.root.geometry(f"{w}x{h}")
-        self.root.update_idletasks()
+        w = max(self.root.winfo_reqwidth() + 24, TUNING_PANEL_MIN_WIDTH + 480)
+        h = max(self.root.winfo_reqheight() + 16, 640)
+        self.root.minsize(min(w, 1280), min(h, 900))
 
-    def _pick_example_config(self) -> None:
-        self.path_var.set(str(EXAMPLE_CFG))
-        self.load_config()
+    def _browse_config(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Open config YAML",
+            filetypes=[("YAML config", "*.yaml *.yml"), ("YAML", "*.yaml"), ("YML", "*.yml")],
+        )
+        if path:
+            self._load_config_path(Path(path))
+
+    def _load_example_config(self) -> None:
+        self._load_config_path(EXAMPLE_CFG)
+
+    def _set_status(self, text: str) -> None:
+        self.status_var.set(text)
+
+    def _section_parent(self, title: str) -> ttk.Frame:
+        frame = ttk.Labelframe(self.tuning_frame, text=title, style="Section.TLabelframe")
+        frame.pack(fill=tk.X, pady=(0, 10), anchor=tk.W)
+        return frame
 
     def _add_control(
         self,
+        parent: ttk.Frame,
         ui_id: str,
         label: str,
         var: tk.Variable,
         *,
         build: Callable[[ttk.Frame, tk.Variable], tk.Widget],
     ) -> None:
-        row = ttk.Frame(self.tuning_frame)
-        row.pack(fill=tk.X, pady=2, anchor=tk.W)
+        row = ttk.Frame(parent)
+        row.pack(fill=tk.X, pady=3, anchor=tk.W)
         input_row = ttk.Frame(row)
         input_row.pack(fill=tk.X, anchor=tk.W)
         field_lbl = ttk.Label(input_row, text=label, width=28, anchor=tk.W)
@@ -232,29 +389,168 @@ class SizerGUI:
             self._scales[ui_id] = widget
             widget.pack_forget()
             unset_ph.pack(side=tk.LEFT, padx=4)
+            widget.bind("<ButtonRelease-1>", self._on_scale_release, add=True)
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                widget.bind(seq, self._scale_wheel_scrolls_canvas, add=True)
         else:
             widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
             unset_ph.pack_forget()
+            widget.bind("<Return>", lambda _e, uid=ui_id: self._schedule_auto_sizing(0, uid), add=True)
+            widget.bind("<FocusOut>", lambda _e, uid=ui_id: self._schedule_auto_sizing(0, uid), add=True)
         own = ttk.Label(
             row,
             text="",
-            font=("TkDefaultFont", 8),
+            font=("Segoe UI", 8),
             foreground="gray",
-            wraplength=TUNING_PANEL_MIN_WIDTH - 12,
+            wraplength=TUNING_PANEL_MIN_WIDTH - 24,
             justify=tk.LEFT,
         )
         own.pack(fill=tk.X, anchor=tk.W, pady=(2, 0), padx=(0, 4))
         self._owner_labels[ui_id] = own
         self.controls[ui_id] = var
         self._tuning_widgets.extend([row, input_row, widget, own, unset_ph])
-        var.trace_add(
-            "write",
-            lambda *_args, uid=ui_id: (
-                self._refresh_owner_caption(uid),
-                self._invalidate_saved_results(),
-                self._update_run_button_state(),
-            ),
+        var.trace_add("write", lambda *_args, uid=ui_id: self._on_control_changed(uid))
+
+    def _on_control_changed(self, ui_id: str) -> None:
+        if self._populating_cfg:
+            return
+        self._refresh_owner_caption(ui_id)
+        self._mark_results_stale()
+        self._update_run_button_state()
+        if ui_id not in self._scale_ui_ids and ui_id != "n_packs":
+            self._schedule_debounced_sizing()
+        elif ui_id == "n_packs":
+            self._schedule_debounced_sizing()
+
+    def _on_scale_release(self, _event: tk.Event) -> None:
+        if self._populating_cfg or not self._controls_editable:
+            return
+        self._schedule_auto_sizing(0)
+
+    def _schedule_debounced_sizing(self) -> None:
+        if self._debounce_after_id is not None:
+            self.root.after_cancel(self._debounce_after_id)
+        self._debounce_after_id = self.root.after(
+            AUTO_SIZING_DEBOUNCE_MS, lambda: self._schedule_auto_sizing(0)
         )
+
+    def _schedule_auto_sizing(self, delay_ms: int = 0, _ui_id: Optional[str] = None) -> None:
+        if self._populating_cfg or not self._controls_editable:
+            return
+        if self._input_invalid or self._any_control_invalid():
+            return
+        if app_gate_blocked(self.base_cfg or {})[0]:
+            return
+        self._sizing_pending = True
+        self._update_pdf_button_state()
+        self._set_status("Update scheduled…")
+        if delay_ms <= 0:
+            self._start_sizing_run()
+        else:
+            self.root.after(delay_ms, self._start_sizing_run)
+
+    def _start_sizing_run(self) -> None:
+        if self._debounce_after_id is not None:
+            self.root.after_cancel(self._debounce_after_id)
+            self._debounce_after_id = None
+        if not self._controls_editable or self.base_cfg is None:
+            self._sizing_pending = False
+            return
+        if self._input_invalid or self._any_control_invalid():
+            self._sizing_pending = False
+            self._update_pdf_button_state()
+            return
+        if app_gate_blocked(self.base_cfg)[0]:
+            self._sizing_pending = False
+            return
+
+        self._sizing_generation += 1
+        run_id = self._sizing_generation
+        self._sizing_pending = False
+        self._sizing_inflight += 1
+        self._sizing_active = True
+        self._update_pdf_button_state()
+        self.update_banner.configure(text="Updating…")
+        self._set_status("Updating sizing…")
+
+        snapshot = {uid: self.controls[uid].get() for uid in self.controls}
+        base_cfg = copy.deepcopy(self.base_cfg)
+
+        def worker() -> None:
+            try:
+                cfg, text, results, sens = run_sizing_report(base_cfg, _SnapshotControls(snapshot))
+                payload: Tuple[str, Any] = ("ok", (cfg, text, results, sens))
+            except Exception as e:
+                payload = ("err", e)
+            self._sizing_queue.put((run_id, payload))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._poll_sizing_queue()
+
+    def _poll_sizing_queue(self) -> None:
+        try:
+            run_id, payload = self._sizing_queue.get_nowait()
+            self._finish_sizing_run(run_id, payload)
+        except queue.Empty:
+            if self._sizing_active:
+                try:
+                    self.root.after(25, self._poll_sizing_queue)
+                except tk.TclError:
+                    pass
+
+    def _finish_sizing_run(self, run_id: int, payload: Tuple[str, Any]) -> None:
+        self._sizing_inflight = max(0, self._sizing_inflight - 1)
+        self._sizing_active = self._sizing_inflight > 0
+        if run_id != self._sizing_generation:
+            self._poll_sizing_queue()
+            return
+        kind, data = payload
+        if kind == "ok":
+            cfg, text, results, sens = data
+            self.last_working_cfg = copy.deepcopy(cfg)
+            self.last_results = results
+            self.last_sens = sens
+            self._last_valid_results_text = text
+            self._last_valid_headline = _extract_result_headline(text)
+            self._results_fresh = True
+            self.update_banner.configure(text="")
+            self._set_results_display(text, current=True)
+            self._set_status("Sizing up to date")
+        else:
+            err = data
+            if isinstance(err, (UiInputError, ConfigError)):
+                self._set_status(f"Input error: {err}")
+                self.update_banner.configure(text="")
+                self._show_results_error(str(err))
+            elif isinstance(err, DesignInputError):
+                self._set_status("Design incomplete")
+                self.update_banner.configure(text="")
+                self._show_results_error("Blocked:\n" + "\n".join(f"  • {m}" for m in err.missing))
+            else:
+                self._set_status("Sizing failed")
+                self.update_banner.configure(text="")
+                messagebox.showerror("Run failed", str(err))
+                self._show_results_error(str(err))
+        self._update_pdf_button_state()
+        self._update_run_button_state()
+
+    def _show_results_error(self, message: str) -> None:
+        if self._last_valid_results_text:
+            banner = f"(Last valid run — current inputs not applied)\n\n{message}\n\n"
+            self._set_results_display(self._last_valid_results_text, current=False, prefix=banner)
+            self.results_headline.configure(text=self._last_valid_headline)
+        else:
+            self._set_results_display(message, current=False)
+            self.results_headline.configure(text="")
+
+    def _set_results_display(self, body: str, *, current: bool, prefix: str = "") -> None:
+        text = prefix + body
+        self.results_text.configure(state=tk.NORMAL)
+        self.results_text.delete("1.0", tk.END)
+        self.results_text.insert(tk.END, text)
+        self.results_text.configure(state=tk.DISABLED)
+        if current:
+            self.results_headline.configure(text=_extract_result_headline(body))
 
     def _apply_scale_readonly_tags(self, locked: bool) -> None:
         for scale in self._scales.values():
@@ -272,8 +568,7 @@ class SizerGUI:
             widget.pack_forget()
             placeholder.pack(side=tk.LEFT, padx=4)
         else:
-            var = self.controls[ui_id]
-            var.set("unset")
+            self.controls[ui_id].set("unset")
 
     def _show_control_value(self, ui_id: str, val: Any) -> None:
         widget = self._input_widgets[ui_id]
@@ -293,8 +588,8 @@ class SizerGUI:
     def _build_tuning_controls(self) -> None:
         ttk.Label(
             self.tuning_frame,
-            text="Tuning (ui-override only when changed)",
-            font=("TkDefaultFont", 10, "bold"),
+            text="Parameters (change to auto-update after release or typing pause)",
+            style="Header.TLabel",
         ).pack(anchor=tk.W, pady=(0, 8))
 
         def scale(row: ttk.Frame, var: tk.Variable, from_, to, resolution=1.0) -> tk.Widget:
@@ -305,96 +600,41 @@ class SizerGUI:
         def spin(r: ttk.Frame, v: tk.Variable, **kw) -> tk.Widget:
             return ttk.Spinbox(r, textvariable=v, width=12, **kw)
 
-        self._add_control(
-            "n_packs",
-            "n_packs",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=1, to=512),
-        )
-        self._add_control(
-            "primary_w",
-            "Night load (W)",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=0, to=20000),
-        )
-        self._add_control(
-            "t_dark_h",
-            "Night hours",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=1, to=240, increment=0.5),
-        )
-        self._add_control(
-            "specific_energy_wh_per_kg_low",
-            "Specific energy low (Wh/kg)",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=50, to=400),
-        )
-        self._add_control(
-            "specific_energy_wh_per_kg_high",
-            "Specific energy high (Wh/kg)",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=50, to=400),
-        )
-        self._add_control(
-            "pack_volumetric_energy_density_wh_per_m3",
-            "Pack volumetric density (Wh/m³)",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=50000, to=500000, increment=1000),
-        )
-        self._add_control(
-            "depth_of_discharge",
-            "Depth of discharge",
-            tk.DoubleVar(master=root),
-            build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
-        )
-        self._add_control(
-            "efficiency",
-            "Discharge η",
-            tk.DoubleVar(master=root),
-            build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
-        )
-        self._add_control(
-            "packaging_insulation_mass_factor",
-            "Packaging factor",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=0.5, to=3.0, increment=0.05),
-        )
-        self._add_control(
-            "box_target_temperature_k",
-            "T_box (K)",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=200, to=310, increment=0.5),
-        )
-        self._add_control(
-            "radiator_temperature_k",
-            "T_rad (K)",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=200, to=310, increment=0.5),
-        )
-        self._add_control(
-            "radiator_emissivity",
-            "Radiator ε",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=0.05, to=1.0, increment=0.01),
-        )
-        self._add_control(
-            "warm_up_h",
-            "Warm-up h",
-            tk.StringVar(master=root, value="unset"),
-            build=lambda r, v: spin(r, v, from_=0.5, to=24, increment=0.25),
-        )
-        self._add_control(
-            "panel_efficiency",
-            "Panel η",
-            tk.DoubleVar(master=root),
-            build=lambda r, v: scale(r, v, 0.05, 0.45, 0.01),
-        )
-        self._add_control(
-            "sun_incidence_cosine",
-            "cos(incidence)",
-            tk.DoubleVar(master=root),
-            build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
-        )
+        builders: Dict[str, Callable[[ttk.Frame, tk.Variable], tk.Widget]] = {
+            "n_packs": lambda r, v: spin(r, v, from_=1, to=512),
+            "primary_w": lambda r, v: spin(r, v, from_=0, to=20000),
+            "t_dark_h": lambda r, v: spin(r, v, from_=1, to=240, increment=0.5),
+            "specific_energy_wh_per_kg_low": lambda r, v: spin(r, v, from_=50, to=400),
+            "specific_energy_wh_per_kg_high": lambda r, v: spin(r, v, from_=50, to=400),
+            "pack_volumetric_energy_density_wh_per_m3": lambda r, v: spin(
+                r, v, from_=50000, to=500000, increment=1000
+            ),
+            "depth_of_discharge": lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
+            "efficiency": lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
+            "packaging_insulation_mass_factor": lambda r, v: spin(r, v, from_=0.5, to=3.0, increment=0.05),
+            "box_target_temperature_k": lambda r, v: spin(r, v, from_=200, to=310, increment=0.5),
+            "radiator_temperature_k": lambda r, v: spin(r, v, from_=200, to=310, increment=0.5),
+            "radiator_emissivity": lambda r, v: spin(r, v, from_=0.05, to=1.0, increment=0.01),
+            "warm_up_h": lambda r, v: spin(r, v, from_=0.5, to=24, increment=0.25),
+            "panel_efficiency": lambda r, v: scale(r, v, 0.05, 0.45, 0.01),
+            "sun_incidence_cosine": lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
+        }
+
+        for section_title, ui_ids in CONTROL_SECTIONS:
+            section = self._section_parent(section_title)
+            for ui_id in ui_ids:
+                self._add_control(
+                    section,
+                    ui_id,
+                    GUI_FIELD_LABELS[ui_id],
+                    self._new_control_var(ui_id, root),
+                    build=builders[ui_id],
+                )
+
+    def _new_control_var(self, ui_id: str, master: tk.Misc) -> tk.Variable:
+        if ui_id in self._scale_ui_ids:
+            return tk.DoubleVar(master=master)
+        return tk.StringVar(master=master, value="unset")
 
     def _refresh_owner_caption(self, ui_id: str) -> None:
         if not self.base_cfg:
@@ -435,9 +675,17 @@ class SizerGUI:
         gate_ok = not app_gate_blocked(self.base_cfg or {})[0]
         self.run_btn.configure(state=tk.NORMAL if gate_ok and not self._input_invalid else tk.DISABLED)
 
-    def _invalidate_saved_results(self) -> None:
+    def _mark_results_stale(self) -> None:
         if self._results_fresh:
             self._results_fresh = False
+        self._update_pdf_button_state()
+
+    def _update_pdf_button_state(self) -> None:
+        if self._sizing_active or self._sizing_pending:
+            self.pdf_btn.configure(state=tk.DISABLED)
+        elif self._results_fresh and self.last_working_cfg is not None:
+            self.pdf_btn.configure(state=tk.NORMAL)
+        else:
             self.pdf_btn.configure(state=tk.DISABLED)
 
     def _set_tuning_state(self, enabled: bool) -> None:
@@ -457,36 +705,35 @@ class SizerGUI:
             self.pdf_btn.configure(state=tk.DISABLED)
         self._apply_scale_readonly_tags(not enabled)
 
-    def _set_results(self, text: str) -> None:
-        self.results_text.configure(state=tk.NORMAL)
-        self.results_text.delete("1.0", tk.END)
-        self.results_text.insert(tk.END, text)
-        self.results_text.configure(state=tk.DISABLED)
-
-    def _show_loaded_path(self, path: Path) -> None:
-        self.loaded_path = path
-        self.loaded_label.configure(text=f"Loaded: {path.name}")
-
-    def load_config(self) -> None:
+    def _load_config_path(self, path: Path) -> None:
+        self._cancel_pending_sizing()
         self.pdf_btn.configure(state=tk.DISABLED)
         self._results_fresh = False
         self.last_results = None
         self.last_sens = None
         self.last_working_cfg = None
+        self._last_valid_results_text = None
+        self._last_valid_headline = ""
         try:
-            path = Path(self.path_var.get().strip())
             self.base_cfg = load_config(path)
-            self._show_loaded_path(path)
+            self.loaded_path = path
+            self.config_name_label.configure(text=path.name)
         except Exception as e:
             self.base_cfg = None
             self.loaded_path = None
-            self.loaded_label.configure(text="")
+            self.config_name_label.configure(text="—")
             self._set_tuning_state(False)
-            self._set_results(f"Could not load config:\n{e}")
+            self._set_results_display(f"Could not load config:\n{e}", current=False)
+            self.results_headline.configure(text="")
+            self._set_status("Failed to load config")
             return
 
         blocked, messages = app_gate_blocked(self.base_cfg)
-        self._populate_controls_from_cfg(allow_partial=blocked)
+        self._populating_cfg = True
+        try:
+            self._populate_controls_from_cfg(allow_partial=blocked)
+        finally:
+            self._populating_cfg = False
         layout_notes = layout_unused_input_messages(self.base_cfg)
         if blocked:
             self._set_tuning_state(False)
@@ -495,21 +742,37 @@ class SizerGUI:
             if layout_notes:
                 lines.append("\nLayout (not used by current model):\n")
                 lines.extend(f"  • {m}" for m in layout_notes)
-            lines.append("\nUse “Load EXAMPLE config…” or examples/example_config.yaml for a runnable demo.")
-            self._set_results("\n".join(lines))
+            lines.append("\nUse Open example… or Browse… for a runnable demo.")
+            self._set_results_display("\n".join(lines), current=False)
+            self.results_headline.configure(text="")
+            self._set_status(f"Blocked — {path.name}")
             self.root.after_idle(self._sync_all_scales)
             self.root.after_idle(self._fit_window_to_content)
             return
 
         self._set_tuning_state(True)
         self._update_run_button_state()
-        lines = [f"Loaded: {path.name}", "", "Adjust sliders if needed, then click Run sizing."]
+        lines = [f"Loaded: {path.name}", "Auto-update runs after you change parameters."]
         if layout_notes:
             lines.extend(["", "Layout (not used by current model):"])
             lines.extend(f"  • {m}" for m in layout_notes)
-        self._set_results("\n".join(lines))
+        self._set_results_display("\n".join(lines), current=False)
+        self.results_headline.configure(text="")
+        self._set_status(f"Loaded {path.name}")
         self.root.after_idle(self._sync_all_scales)
         self.root.after_idle(self._fit_window_to_content)
+        if self._auto_run_after_load:
+            self._schedule_auto_sizing(50)
+
+    def _cancel_pending_sizing(self) -> None:
+        if self._debounce_after_id is not None:
+            self.root.after_cancel(self._debounce_after_id)
+            self._debounce_after_id = None
+        self._sizing_generation += 1
+        self._sizing_pending = False
+        self._sizing_inflight = 0
+        self._sizing_active = False
+        self.update_banner.configure(text="")
 
     def _populate_controls_from_cfg(self, *, allow_partial: bool) -> None:
         assert self.base_cfg is not None
@@ -536,35 +799,27 @@ class SizerGUI:
     def run_sizing(self) -> None:
         blocked, messages = app_gate_blocked(self.base_cfg or {})
         if blocked:
-            self._set_results("Blocked:\n" + "\n".join(f"  • {m}" for m in messages))
+            self._set_results_display("Blocked:\n" + "\n".join(f"  • {m}" for m in messages), current=False)
+            self.results_headline.configure(text="")
             return
         if self._input_invalid or self._any_control_invalid():
-            self._set_results("Fix invalid tuning inputs (see owner captions) before Run sizing.")
+            self._set_results_display(
+                "Fix invalid tuning inputs (see owner captions) before Run sizing.", current=False
+            )
             self._update_run_button_state()
             return
-        try:
-            cfg, text, results, sens = run_sizing_report(self.base_cfg or {}, self.controls)
-            self.last_working_cfg = copy.deepcopy(cfg)
-            self.last_results = results
-            self.last_sens = sens
-            self._set_results(text)
-            self._results_fresh = True
-            self.pdf_btn.configure(state=tk.NORMAL)
-        except Exception as e:
-            if isinstance(e, (UiInputError, ConfigError)):
-                self._set_results(f"Input error:\n  • {e}")
-                self._update_run_button_state()
-            else:
-                messagebox.showerror("Run failed", str(e))
+        self._start_sizing_run()
 
     def save_pdf(self) -> None:
         if (
-            not self._results_fresh
+            self._sizing_active
+            or self._sizing_pending
+            or not self._results_fresh
             or self.last_working_cfg is None
             or self.last_results is None
             or self.last_sens is None
         ):
-            messagebox.showinfo("Save PDF", "Run sizing first (controls must match the last run).")
+            messagebox.showinfo("Save PDF", "Wait for sizing to finish (Save uses the last completed run).")
             return
         path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
