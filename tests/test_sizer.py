@@ -78,8 +78,8 @@ def test_night_energy_wh():
 
 
 def test_pack_mass_hand_calc():
-    cap = 474341.6
-    assert compute_pack_mass_kg(cap, 200.0, 1.0) == pytest.approx(2371.71, rel=1e-4)
+    cap = 500_000.0
+    assert compute_pack_mass_kg(cap, 200.0, 1.0) == pytest.approx(2500.0, rel=1e-4)
 
 
 def test_capacity_uses_discharge_eta_round_trip():
@@ -102,10 +102,11 @@ def test_pick_internal_matches_eta_definition_round_trip():
     assert val == q["round_trip_definition"]
 
 
-def test_eta_definition_blocks_luke_config():
+def test_luke_config_still_blocks_until_geometry_set():
     cfg = load_config(LUKE_CFG)
     missing = blocking_missing(cfg)
-    assert "battery.eta_definition" in missing
+    assert "battery.eta_definition" not in missing
+    assert "fallback.mode" not in missing
     with pytest.raises(DesignInputError):
         validate_for_run(cfg)
 
@@ -196,7 +197,7 @@ def test_constant_h_fin_analytic_fd_tanh():
     assert qa == pytest.approx(manual, rel=1e-9)
     for n in (12, 50, 200):
         qn = bvp_constant_h_fin_w(**FIN_BENCH, n_nodes=n)
-        assert qn == pytest.approx(qa, rel=0.01)
+        assert qn == pytest.approx(qa, rel=0.002)
 
 
 def test_linear_fin_bvp_forced_failure():
@@ -212,6 +213,11 @@ def test_linear_fin_bvp_forced_failure():
             12,
             max_nodes=8,
         )
+
+
+def test_radiating_leg_bvp_forced_failure():
+    with pytest.raises(FinSolverError):
+        solve_radiating_leg_fin(**LEG_BVP, n_nodes=12, max_nodes=8)
 
 
 def test_radiating_leg_grid_convergence():
@@ -257,8 +263,7 @@ def test_box_radiation_hand_calc(example_cfg):
 
 def test_example_primary_thermal_targets(example_cfg):
     r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    q_int, _ = pick_internal_heat(internal_waste_heat_w(5000, param_value(example_cfg, "battery", "efficiency")), "round_trip")
-    assert r.q_internal_w == pytest.approx(q_int, rel=1e-6)
+    assert r.q_internal_w == pytest.approx(555.56, rel=0.001)
     assert r.thermal.q_leg_w > 0
     assert r.thermal.q_total_w == pytest.approx(r.thermal.q_box_rad_w + r.thermal.q_leg_w + r.thermal.q_passthrough_w, rel=1e-4)
 
@@ -267,7 +272,9 @@ def test_example_known_primary_thermal_numbers(example_cfg):
     r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
     assert r.thermal.q_leg_w == pytest.approx(20.36, rel=0.001)
     assert r.thermal.q_total_w == pytest.approx(210.22, rel=0.001)
-    assert r.q_excess_w == pytest.approx(60.24, rel=0.001)
+    assert r.q_internal_w == pytest.approx(555.56, rel=0.001)
+    assert r.q_excess_w == pytest.approx(345.34, rel=0.001)
+    assert r.battery.capacity_wh == pytest.approx(500_000.0, rel=0.001)
 
 
 def test_example_same_pack_survival_transient_dt(example_cfg):
@@ -276,7 +283,7 @@ def test_example_same_pack_survival_transient_dt(example_cfg):
         "survival_100W", 100, 200, example_cfg,
         fallback_branch="same_pack_survival", primary_pack=prim.battery, transient_mass_kg=prim.battery.mass_kg,
     )
-    assert surv.transient_delta_t_k == pytest.approx(-22.38, rel=0.001)
+    assert surv.transient_delta_t_k == pytest.approx(-20.64, rel=0.001)
 
 
 def test_lander_deck_missing_temperature_raises(example_cfg):
@@ -318,7 +325,7 @@ def test_fixed_rtg_heater_iteration(example_cfg):
         fallback_branch="same_pack_survival", primary_pack=prim.battery, transient_mass_kg=prim.battery.mass_kg,
     )
     coupling = param_value(cfg, "rtg", "coupling_fraction")
-    q_int, _ = pick_internal_heat(internal_waste_heat_w(100, param_value(cfg, "battery", "efficiency")), "round_trip")
+    q_int, _ = pick_internal_heat(internal_waste_heat_w(100, param_value(cfg, "battery", "efficiency")), "discharge")
     q_rtg_del = coupling * 10.0
     expected_h = heater_shortfall_w(r.thermal.q_total_w, q_int, coupling, 10.0)
     assert r.battery.p_heater_w == pytest.approx(expected_h, rel=1e-4)

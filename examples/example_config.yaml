@@ -26,7 +26,7 @@ night:
   t_dark_h:
     value: 72
     units: h
-    source: "Luke — CR1 best site lunar night duration"
+    source: "Luke — longest dark interval at the chosen CR1 site (CR1 illumination model). Program-level 'Night survival 120+ hours' in Requirements doc is the mission target; Luke chose 72 h for this site."
     owner: luke
 
 battery:
@@ -41,10 +41,10 @@ battery:
     source: "Luke"
     owner: luke
   eta_definition:
-    value: "round_trip"
+    value: discharge
     units: "round_trip | discharge"
-    source: "EXAMPLE placeholder until Luke chooses (round_trip uses sqrt(eta) for both capacity and Q_internal)"
-    owner: placeholder
+    source: "Luke — discharge-side efficiency for pack sizing and Q_internal = P_load*(1/η-1)"
+    owner: luke
   specific_energy_wh_per_kg_low:
     value: 150
     units: Wh/kg
@@ -110,7 +110,7 @@ thermal_environment:
   night_surface_k:
     value: 40
     units: K
-    source: "Luke — Diviner night surface"
+    source: "Luke — Diviner polar night surface (Williams et al. 2019 JGR Planets; Schorghofer & Williams 2020 PSJ), per Requirements doc"
     owner: luke
   regolith_k_surface_w_per_mk:
     value: 7.4e-4
@@ -272,10 +272,10 @@ rtg:
 
 fallback:
   mode:
-    value: null
+    value: same_pack_survival
     units: string
-    source: "Report both branches until Luke chooses"
-    owner: TODO-luke
+    source: "Luke — survival load on the same primary pack/box geometry (not separate_pack)"
+    owner: luke
   pack_volumetric_energy_density_wh_per_m3:
     value: 250000
     units: Wh/m^3

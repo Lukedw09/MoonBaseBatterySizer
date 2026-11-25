@@ -555,6 +555,7 @@ def solve_radiating_leg_fin(
     n_nodes: int,
     sigma: float,
     rtol: float = 1e-5,
+    max_nodes: Optional[int] = None,
 ) -> Tuple[float, float, List[float]]:
     """Radiating leg: scipy BVP, fixed T_root, foot R_contact+R_regolith to t_surf."""
     import numpy as np
@@ -584,7 +585,8 @@ def solve_radiating_leg_fin(
     x = np.linspace(0.0, length_m, max(3, n_nodes))
     tg = np.linspace(t_root_k, max(t_surf_k, t_root_k * 0.5), n_nodes)
     y0 = np.vstack([tg, np.gradient(tg, x, edge_order=2)])
-    sol = solve_bvp(fun, bc, x, y0, tol=rtol, max_nodes=max(8000, 4 * n_nodes), verbose=0)
+    node_cap = max_nodes if max_nodes is not None else max(8000, 4 * n_nodes)
+    sol = solve_bvp(fun, bc, x, y0, tol=rtol, max_nodes=node_cap, verbose=0)
     if not sol.success:
         raise FinSolverError(f"Radiating leg BVP failed (n_mesh={n_nodes}): {sol.message}")
     max_res = float(np.max(np.abs(sol.rms_residuals))) if sol.rms_residuals is not None else 0.0
@@ -957,6 +959,35 @@ def todo_luke_list(cfg: Dict[str, Any]) -> List[str]:
     return rows
 
 
+def electric_heater_alternative(r: CaseResult) -> Optional[Dict[str, float]]:
+    """Steady electric heat to cover thermal shortfall instead of RTG thermal delivery."""
+    p_short = max(0.0, r.thermal.q_total_w - r.q_internal_w)
+    if p_short <= 0:
+        return None
+    e_heater_wh = p_short * r.battery.t_dark_h
+    capacity_extra_wh = e_heater_wh / (r.battery.dod * r.battery.eta_discharge)
+    return {
+        "p_shortfall_w": p_short,
+        "e_heater_wh": e_heater_wh,
+        "capacity_extra_wh": capacity_extra_wh,
+    }
+
+
+def format_electric_heater_alt_line(r: CaseResult) -> Optional[str]:
+    if r.fallback_branch != "same_pack_survival":
+        return None
+    alt = electric_heater_alternative(r)
+    if alt is None:
+        return None
+    b = r.battery
+    return (
+        f"  Electric-heater alt (vs RTG thermal): P_heat={alt['p_shortfall_w']:.1f} W steady → "
+        f"{alt['e_heater_wh']/1000:.3f} kWh over {b.t_dark_h:.0f} h; "
+        f"+{alt['capacity_extra_wh']/1000:.3f} kWh capacity increment "
+        f"(DoD={b.dod}, η_dis={b.eta_discharge:.3f})"
+    )
+
+
 def placeholder_list(cfg: Dict[str, Any]) -> List[str]:
     rows = []
     for row in flatten_inputs(cfg):
@@ -1005,7 +1036,10 @@ def format_results_table(results: List[CaseResult], coupling_set: bool) -> str:
         if r.radiative_coupling_info is not None:
             lines.append(f"  Info only: radiative coupling estimate ≈ {r.radiative_coupling_info:.4f}")
         if r.transient_delta_t_k is not None:
-            lines.append(f"  Transient ΔT (no RTG) ≈ {r.transient_delta_t_k:.2f} K")
+            lines.append(f"  Transient ΔT (passive coast, no RTG) ≈ {r.transient_delta_t_k:.2f} K")
+        alt_line = format_electric_heater_alt_line(r)
+        if alt_line:
+            lines.append(alt_line)
         if r.transient_warning:
             lines.append(f"  WARNING: {r.transient_warning}")
     lines.append(
@@ -1129,8 +1163,15 @@ def write_report_pdf(
                 block += f" Q_RTG={r.q_rtg_total_w:.0f}W"
             if r.q_excess_w > 0:
                 block += f" EXCESS={r.q_excess_w:.0f}W"
+            if r.transient_delta_t_k is not None:
+                block += f" dT={r.transient_delta_t_k:.1f}K"
             ax.text(0.05, y, block, fontsize=7, family="monospace", va="top")
-            y -= 0.07
+            y -= 0.055
+            alt_line = format_electric_heater_alt_line(r)
+            if alt_line:
+                ax.text(0.05, y, alt_line.strip()[:120], fontsize=6, family="monospace", va="top")
+                y -= 0.045
+            y -= 0.02
         pdf.savefig(fig)
         plt.close(fig)
 
