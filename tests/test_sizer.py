@@ -59,6 +59,8 @@ from sizer import (
     solve_radiating_leg_fin,
     total_ring_radiating_area_m2,
     validate_for_run,
+    write_report_pdf,
+    todo_luke_list,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -526,6 +528,31 @@ def test_cold_shutdown_stuck_open_n8(example_cfg):
     assert cs.coast_stuck_open_t_final_k < cs.coast_t_final_k
     assert cs.coast_stuck_open_margin_lipo_k == pytest.approx(cs.coast_stuck_open_t_final_k - 233.0, rel=0.001)
     assert cs.louvers_stuck_below_lipo is True
+
+
+def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    from sizer import format_n_packs_table
+
+    results = run_all_cases(example_cfg)
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=200, n_list=(1, 2, 4, 8, 16))
+    table = format_n_packs_table(sens, example_cfg)
+    data_lines = [ln for ln in table.splitlines() if ln.strip() and ln.lstrip()[0].isdigit()]
+    assert "dLiPo_so" in table
+    assert all(len(ln) >= 110 for ln in data_lines)
+    assert all(ln.rstrip().endswith("*") for ln in data_lines)
+    assert any("!" in ln for ln in data_lines)
+
+    pdf = tmp_path / "sweep_flags.pdf"
+    write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
+    text = "\n".join((page.extract_text() or "") for page in PdfReader(pdf).pages)
+    assert "dLiPo_so" in text
+    assert "stuck-open below LiPo" in text or "stuck-open" in text
+    assert "!" in text
+    assert "*" in text
+    assert "BELOW LiPo limit" in text
 
 
 def test_streamlit_app_gate_smoke():

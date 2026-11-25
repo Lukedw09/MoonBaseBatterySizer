@@ -1993,6 +1993,10 @@ def write_report_pdf(
                 block += f" Tf_closed={r.coast_t_final_k:.1f}K"
                 if r.coast_stuck_open_t_final_k is not None:
                     block += f" Tf_stuck={r.coast_stuck_open_t_final_k:.1f}K"
+                    if r.louvers_stuck_below_lipo and r.coast_stuck_open_margin_lipo_k is not None:
+                        block += (
+                            f" BELOW LiPo limit margin={r.coast_stuck_open_margin_lipo_k:.1f}K"
+                        )
             if r.dawn_warmup_energy_wh:
                 block += f" warm={r.dawn_warmup_energy_wh/1000:.1f}kWh"
             ax.text(0.05, y, block, fontsize=7, family="monospace", va="top")
@@ -2022,14 +2026,21 @@ def write_report_pdf(
         plt.close(fig)
 
         if n_pack_rows:
+            sweep_lines = format_n_packs_table(n_pack_rows, cfg).splitlines()
             fig, ax = plt.subplots(figsize=(8.5, 11))
             ax.axis("off")
             y = 0.98
-            for line in format_n_packs_table(n_pack_rows, cfg).splitlines():
-                ax.text(0.03, y, line[:110], fontsize=5, family="monospace", va="top")
-                y -= 0.022
-                if y < 0.03:
-                    break
+            sweep_fs = 4.0
+            dy = 0.0165
+            for line in sweep_lines:
+                if y < 0.02:
+                    pdf.savefig(fig)
+                    plt.close(fig)
+                    fig, ax = plt.subplots(figsize=(8.5, 11))
+                    ax.axis("off")
+                    y = 0.98
+                ax.text(0.01, y, line, fontsize=sweep_fs, family="monospace", va="top")
+                y -= dy
             pdf.savefig(fig)
             plt.close(fig)
 

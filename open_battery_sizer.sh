@@ -11,7 +11,13 @@ fail() {
 
 if ! command -v python3 >/dev/null 2>&1; then
   fail "Python 3 is not installed or not on your PATH.
-Download Python 3 for free at:
+Download Python 3.9 or newer for free at:
+  https://www.python.org/downloads/"
+fi
+
+if ! python3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>/dev/null; then
+  fail "This sizer needs Python 3.9 or newer.
+Download a current Python 3 at:
   https://www.python.org/downloads/"
 fi
 

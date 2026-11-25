@@ -48,11 +48,14 @@ There is **no separate low-load survival case**; radiator **louvers or a passive
 
 ## Tests
 
-Install dependencies first (`pip install -r requirements.txt` or use a launcher). AppTest needs **streamlit** from that file.
+For tests, install dev dependencies (includes pytest and PDF check helpers):
 
 ```bash
+pip install -r requirements-dev.txt
 python3 -m pytest -q
 ```
+
+The launcher and app only need `requirements.txt`. AppTest needs **streamlit** from that file.
 
 ## AI use
 
