@@ -7,7 +7,13 @@ cd /d "%~dp0" || (
 )
 
 set "PY="
-where py >nul 2>&1 && py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 2)" 2>nul && set "PY=py -3"
+set "PY_TOO_OLD="
+where py >nul 2>&1
+if not errorlevel 1 (
+  py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 2)" 2>nul
+  if errorlevel 2 if not errorlevel 3 set "PY_TOO_OLD=1"
+  if not errorlevel 1 set "PY=py -3"
+)
 if not defined PY (
   where python >nul 2>&1
   if not errorlevel 1 (
@@ -23,6 +29,15 @@ if not defined PY (
     )
     if not errorlevel 1 set "PY=python"
   )
+)
+if not defined PY if defined PY_TOO_OLD (
+  echo.
+  echo  This sizer needs Python 3.9 or newer.
+  echo  Download a current Python 3 at:
+  echo    https://www.python.org/downloads/
+  echo.
+  pause
+  exit /b 1
 )
 if not defined PY (
   echo.
@@ -62,8 +77,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Starting Moon Base Battery Sizer in your browser...
-call ".venv\Scripts\streamlit.exe" run app.py
+call ".venv\Scripts\python.exe" -c "import tkinter" 2>nul
+if errorlevel 1 (
+  echo.
+  echo  Tkinter is not available in this Python install.
+  echo  Reinstall Python from https://www.python.org/downloads/ and enable Tcl/Tk.
+  echo.
+  pause
+  exit /b 1
+)
+
+echo Starting Moon Base Battery Sizer...
+call ".venv\Scripts\python.exe" gui.py
 if errorlevel 1 (
   echo.
   echo The app stopped with an error - see message above.

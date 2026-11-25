@@ -38,7 +38,13 @@ echo "Installing or updating dependencies from requirements.txt..."
 .venv/bin/python -m pip install -q --upgrade pip
 .venv/bin/pip install -q -r requirements.txt || fail "pip install failed."
 
-echo "Starting Moon Base Battery Sizer in your browser..."
-if ! .venv/bin/streamlit run app.py; then
+if ! .venv/bin/python -c "import tkinter" 2>/dev/null; then
+  fail "Tkinter is missing on this Mac Python install.
+Reinstall Python from https://www.python.org/downloads/ (includes Tk),
+or install a build that ships Tcl/Tk."
+fi
+
+echo "Starting Moon Base Battery Sizer..."
+if ! .venv/bin/python gui.py; then
   fail "The app stopped with an error - see message above."
 fi

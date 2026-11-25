@@ -17,6 +17,26 @@ import yaml
 
 SIGMA_DEFAULT = 5.670374419e-8
 
+# n-packs sweep PDF layout (shared by write_report_pdf and layout tests).
+N_PACK_SWEEP_LINE_DY = 0.0135
+N_PACK_SWEEP_FONT_SIZE = 7.5
+N_PACK_SWEEP_X_FRAC = 0.06
+SWEEP_PDF_PAGE_LABEL = "moonbase_n_pack_sweep"
+RESULTS_PDF_PAGE_LABEL = "moonbase_results"
+N_PACK_SWEEP_FIGURE_DPI = 100.0
+
+
+def sweep_pdf_glyph_width_scale(
+    font_pt: float = N_PACK_SWEEP_FONT_SIZE,
+    dpi: float = N_PACK_SWEEP_FIGURE_DPI,
+) -> float:
+    """Scale Agg text bbox width to embedded PDF at given font size and figure dpi."""
+    a = 0.60205 * font_pt * dpi / 72.0
+    return a / max(round(a), 1)
+
+
+SWEEP_PDF_GLYPH_WIDTH_SCALE = sweep_pdf_glyph_width_scale()
+
 # Paths that must be set (value not null) before a full sizing run.
 DESIGN_PATHS = [
     ("layout", "model"),
@@ -136,11 +156,18 @@ def blocking_missing(cfg: Dict[str, Any]) -> List[str]:
     for row in flatten_inputs(cfg):
         if row["owner"] != "TODO-luke" or row["value"] != "(unset)":
             continue
+        if layout_unused_input_note(cfg, row["path"]):
+            continue
         if row["path"] in NON_BLOCKING_TODO_PATHS or row["path"] in design_dotted:
             continue
         if row["path"] == "rtg.thermal_output_w" and mode != "fixed_rtg":
             continue
         missing.append(f"{row['path']} ({row['source']})")
+    if layout_model(cfg) == "ring_rtg":
+        if param_value(cfg, "geometry", "ring_radius_m") is None:
+            missing.append("geometry.ring_radius_m (required for ring_rtg layout)")
+        if param_value(cfg, "geometry", "n_battery_boxes") is None:
+            missing.append("geometry.n_battery_boxes (required for ring_rtg layout)")
     return sorted(set(missing))
 
 
@@ -173,6 +200,37 @@ def validate_for_run(cfg: Dict[str, Any], allow_incomplete: bool = False) -> Non
     missing = blocking_missing(cfg)
     if missing and not allow_incomplete:
         raise DesignInputError(missing)
+
+
+def layout_model(cfg: Dict[str, Any]) -> str:
+    return str(param_value(cfg, "layout", "model") or "distributed_packs")
+
+
+def layout_unused_input_note(cfg: Dict[str, Any], path: str) -> Optional[str]:
+    """Explain geometry fields ignored by the active layout model (not sizing blockers)."""
+    model = layout_model(cfg)
+    if model == "distributed_packs":
+        if path == "geometry.ring_radius_m":
+            return "not used by distributed_packs layout"
+        if path == "geometry.bottom_radiates_to":
+            return "not used by distributed_packs layout (bottom to ground)"
+        if path == "thermal_environment.lander_deck_temperature_k":
+            return "not used by distributed_packs layout (bottom to ground)"
+    elif model == "ring_rtg":
+        if path == "thermal_environment.lander_deck_temperature_k":
+            bottom = param_value(cfg, "geometry", "bottom_radiates_to")
+            if bottom != "lander_deck":
+                return "not used unless bottom_radiates_to=lander_deck"
+    return None
+
+
+def layout_unused_input_messages(cfg: Dict[str, Any]) -> List[str]:
+    rows: List[str] = []
+    for row in flatten_inputs(cfg):
+        note = layout_unused_input_note(cfg, row["path"])
+        if note:
+            rows.append(f"{row['path']}: {row['value']} — {note}")
+    return rows
 
 
 def battery_efficiency_value(cfg: Dict[str, Any]) -> float:
@@ -1944,9 +2002,9 @@ def render_n_pack_sweep_lines_on_figure(
     sweep_lines: List[str],
     *,
     start_y: float = 0.98,
-    sweep_fs: float = 7.5,
-    dy: float = 0.0135,
-    x_frac: float = 0.06,
+    sweep_fs: float = N_PACK_SWEEP_FONT_SIZE,
+    dy: float = N_PACK_SWEEP_LINE_DY,
+    x_frac: float = N_PACK_SWEEP_X_FRAC,
 ) -> float:
     """Draw monospace sweep lines using figure coords (full page width). Returns final y."""
     y = start_y
@@ -1962,17 +2020,6 @@ def render_n_pack_sweep_lines_on_figure(
         )
         y -= dy
     return y
-
-
-def build_n_pack_sweep_figure(sweep_lines: List[str]):
-    """Build a single-page sweep figure (for tests and layout checks)."""
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(8.5, 11))
-    ax.axis("off")
-    ax.set_position([0, 0, 1, 1])
-    render_n_pack_sweep_lines_on_figure(fig, sweep_lines)
-    return fig
 
 
 def figure_text_extents_px(fig) -> Tuple[float, List[Tuple[float, float, str]]]:
@@ -1998,6 +2045,186 @@ def figure_text_extents_px(fig) -> Tuple[float, List[Tuple[float, float, str]]]:
     return w_px, rows
 
 
+def figure_text_extents_pdf_scaled(
+    fig,
+) -> Tuple[float, List[Tuple[float, float, str]]]:
+    """Like figure_text_extents_px but scale line width for PDF monospace vs Agg screen rounding."""
+    w_px, rows = figure_text_extents_px(fig)
+    scaled = [
+        (x0, x0 + (x1 - x0) * SWEEP_PDF_GLYPH_WIDTH_SCALE, txt) for x0, x1, txt in rows
+    ]
+    return w_px, scaled
+
+
+_PDF_NOTES_WRAP_COLS = 120
+_PDF_NOTES_Y_MIN = 0.05
+_PDF_NOTES_LINE_DY = 0.018
+_PDF_NOTES_CONT_X = 0.08
+
+
+def _pdf_wrap_bullet_lines(text: str, width: int = _PDF_NOTES_WRAP_COLS) -> List[str]:
+    import textwrap
+
+    wrapped = textwrap.wrap(text, width=max(20, width - 2))
+    if not wrapped:
+        return ["•"]
+    lines = [f"• {wrapped[0]}"]
+    for cont in wrapped[1:]:
+        lines.append(f"  {cont}")
+    return lines
+
+
+def _pdf_notes_continuation(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+) -> Tuple[Any, Any, float]:
+    import matplotlib.pyplot as plt
+
+    if y >= _PDF_NOTES_Y_MIN:
+        return fig, ax, y
+    pdf.savefig(fig)
+    plt.close(fig)
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.axis("off")
+    return fig, ax, 0.95
+
+
+_PDF_BODY_TEXT_WIDTH = 95
+_PDF_RESULTS_BLOCK_DY = 0.075
+
+
+def _pdf_results_page_next_y(y_after_block: float, y_block_top: float) -> float:
+    return min(y_after_block, y_block_top - _PDF_RESULTS_BLOCK_DY)
+
+
+def _pdf_draw_wrapped_text_block(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+    text: str,
+    *,
+    fontsize: float = 7,
+    dy: float = _PDF_NOTES_LINE_DY,
+    wrap_width: int = _PDF_BODY_TEXT_WIDTH,
+    family: Optional[str] = None,
+    fontweight: Optional[str] = None,
+) -> Tuple[Any, Any, float]:
+    import textwrap
+
+    for raw in text.splitlines():
+        chunks = textwrap.wrap(raw, width=wrap_width) if raw else [""]
+        for line in chunks:
+            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+            kwargs: Dict[str, Any] = {"fontsize": fontsize, "va": "top"}
+            if family:
+                kwargs["family"] = family
+            if fontweight:
+                kwargs["fontweight"] = fontweight
+            ax.text(0.05, y, line, **kwargs)
+            y -= dy
+    return fig, ax, y
+
+
+def _pdf_draw_plain_lines(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+    lines: List[str],
+    *,
+    fontsize: float = 5,
+    dy: float = _PDF_NOTES_LINE_DY,
+    family: Optional[str] = None,
+) -> Tuple[Any, Any, float]:
+    for line in lines:
+        fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+        kwargs: Dict[str, Any] = {"fontsize": fontsize}
+        if family:
+            kwargs["family"] = family
+        ax.text(0.05, y, line, **kwargs)
+        y -= dy
+    return fig, ax, y
+
+
+def _pdf_format_result_block(r: "CaseResult") -> str:
+    block = (
+        f"{r.load_name}/{r.case} @ {r.specific_energy_wh_kg} Wh/kg\n"
+        f" mass={r.battery.mass_kg:.0f}kg Q_int={r.q_internal_w:.0f}W Q_loss={r.thermal.q_total_w:.0f}W"
+    )
+    if r.q_rtg_total_w is not None:
+        block += f" Q_RTG={r.q_rtg_total_w:.0f}W"
+    if r.q_excess_w > 0:
+        block += f" EXCESS={r.q_excess_w:.0f}W"
+    if r.transient_delta_t_k is not None:
+        block += f" dT={r.transient_delta_t_k:.1f}K"
+    if r.case == "cold_shutdown" and r.coast_t_final_k is not None:
+        block += f" Tf_closed={r.coast_t_final_k:.1f}K"
+        if r.coast_stuck_open_t_final_k is not None:
+            block += f" Tf_stuck={r.coast_stuck_open_t_final_k:.1f}K"
+            if r.louvers_stuck_below_lipo and r.coast_stuck_open_margin_lipo_k is not None:
+                block += f" BELOW LiPo limit margin={r.coast_stuck_open_margin_lipo_k:.1f}K"
+    if r.dawn_warmup_energy_wh:
+        block += f" warm={r.dawn_warmup_energy_wh/1000:.1f}kWh"
+    return block
+
+
+# Heuristic limits for FinSolver user-facing messages only (unsourced; no effect on thermal math).
+LEG_BVP_NPACKS_MSG_MAX_LEG_LENGTH_M = 5.0
+LEG_BVP_NPACKS_MSG_MIN_LEG_AREA_M2 = 1e-5
+
+
+def fin_solver_error_is_n_packs_mesh_limit(cfg: Dict[str, Any], err: FinSolverError) -> bool:
+    """Max mesh-node failures from high pack count with otherwise plausible leg geometry."""
+    if "maximum number of mesh nodes" not in str(err).lower():
+        return False
+    leg_len = param_value(cfg, "lander_legs", "leg_length_m")
+    a_cross = param_value(cfg, "lander_legs", "leg_cross_section_m2")
+    if leg_len is None or a_cross is None:
+        return False
+    if float(leg_len) > LEG_BVP_NPACKS_MSG_MAX_LEG_LENGTH_M:
+        return False
+    if float(a_cross) < LEG_BVP_NPACKS_MSG_MIN_LEG_AREA_M2:
+        return False
+    return True
+
+
+def n_packs_leg_mesh_config_error(cfg: Dict[str, Any], err: FinSolverError) -> ConfigError:
+    n = param_value(cfg, "geometry", "n_packs")
+    leg_len = param_value(cfg, "lander_legs", "leg_length_m")
+    a_cross = param_value(cfg, "lander_legs", "leg_cross_section_m2")
+    if fin_solver_error_is_n_packs_mesh_limit(cfg, err):
+        return ConfigError(
+            f"n_packs too large for leg thermal mesh at n_packs={n} "
+            f"(radiator/leg BVP did not converge — try lowering pack count): {err}"
+        )
+    return ConfigError(
+        f"Leg thermal BVP did not converge (n_packs={n}, L={leg_len} m, A={a_cross} m²): "
+        f"check leg geometry/units or lower n_packs: {err}"
+    )
+
+
+def _pdf_draw_wrapped_bullets(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+    items: List[str],
+    *,
+    fontsize: float = 5,
+    wrap_width: int = _PDF_NOTES_WRAP_COLS,
+) -> Tuple[Any, Any, float]:
+    for item in items:
+        for line in _pdf_wrap_bullet_lines(item, wrap_width):
+            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+            x = _PDF_NOTES_CONT_X if line.startswith("  ") else 0.05
+            ax.text(x, y, line, fontsize=fontsize)
+            y -= _PDF_NOTES_LINE_DY
+    return fig, ax, y
+
+
 def write_report_pdf(
     path: Path,
     cfg: Dict[str, Any],
@@ -2015,52 +2242,56 @@ def write_report_pdf(
         fig, ax = plt.subplots(figsize=(8.5, 11))
         ax.axis("off")
         title = param_value(cfg, "meta", "title")
-        ax.text(0.05, 0.98, str(title), fontsize=12, fontweight="bold", va="top")
-        ax.text(
-            0.05,
-            0.93,
+        y = 0.98
+        fig, ax, y = _pdf_draw_wrapped_text_block(
+            pdf, fig, ax, y, str(title), fontsize=11, dy=0.026, wrap_width=58, fontweight="bold"
+        )
+        y -= 0.01
+        fig, ax, y = _pdf_draw_wrapped_text_block(
+            pdf,
+            fig,
+            ax,
+            y,
             "AI-assisted implementation (Cursor cloud agent, directed by Luke via Grok Bot).\n"
             "Cited parameters researched with AI assistance and labeled in config.\n"
             "e* × area drives thermal loss; T_sky/T_ground are secondary.",
             fontsize=7,
-            va="top",
+            dy=0.018,
+            wrap_width=88,
         )
-        y = 0.86
-        for row in flatten_inputs(cfg)[:50]:
-            ax.text(0.05, y, f"{row['path']}: {row['value']} [{row['owner']}]", fontsize=5, family="monospace")
-            y -= 0.016
-            if y < 0.05:
-                break
+        y = min(y, 0.86)
+        input_lines = []
+        for row in flatten_inputs(cfg):
+            line = f"{row['path']}: {row['value']} [{row['owner']}]"
+            unused = layout_unused_input_note(cfg, row["path"])
+            if unused:
+                line += f" — {unused}"
+            input_lines.append(line)
+        fig, ax, _y = _pdf_draw_plain_lines(
+            pdf, fig, ax, y, input_lines, fontsize=5, dy=0.016, family="monospace"
+        )
         pdf.savefig(fig)
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8.5, 11))
+        fig.set_label(RESULTS_PDF_PAGE_LABEL)
         ax.axis("off")
         y = 0.98
-        for r in results[:18]:
-            block = (
-                f"{r.load_name}/{r.case} @ {r.specific_energy_wh_kg} Wh/kg\n"
-                f" mass={r.battery.mass_kg:.0f}kg Q_int={r.q_internal_w:.0f}W Q_loss={r.thermal.q_total_w:.0f}W"
+        for block in (_pdf_format_result_block(r) for r in results):
+            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+            y_top = y
+            fig, ax, y = _pdf_draw_wrapped_text_block(
+                pdf,
+                fig,
+                ax,
+                y,
+                block,
+                fontsize=7,
+                dy=0.018,
+                wrap_width=_PDF_BODY_TEXT_WIDTH,
+                family="monospace",
             )
-            if r.q_rtg_total_w is not None:
-                block += f" Q_RTG={r.q_rtg_total_w:.0f}W"
-            if r.q_excess_w > 0:
-                block += f" EXCESS={r.q_excess_w:.0f}W"
-            if r.transient_delta_t_k is not None:
-                block += f" dT={r.transient_delta_t_k:.1f}K"
-            if r.case == "cold_shutdown" and r.coast_t_final_k is not None:
-                block += f" Tf_closed={r.coast_t_final_k:.1f}K"
-                if r.coast_stuck_open_t_final_k is not None:
-                    block += f" Tf_stuck={r.coast_stuck_open_t_final_k:.1f}K"
-                    if r.louvers_stuck_below_lipo and r.coast_stuck_open_margin_lipo_k is not None:
-                        block += (
-                            f" BELOW LiPo limit margin={r.coast_stuck_open_margin_lipo_k:.1f}K"
-                        )
-            if r.dawn_warmup_energy_wh:
-                block += f" warm={r.dawn_warmup_energy_wh/1000:.1f}kWh"
-            ax.text(0.05, y, block, fontsize=7, family="monospace", va="top")
-            y -= 0.055
-            y -= 0.02
+            y = _pdf_results_page_next_y(y, y_top)
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -2071,27 +2302,26 @@ def write_report_pdf(
         if ph:
             ax.text(0.05, y, "placeholder values (not Luke design):", fontweight="bold")
             y -= 0.025
-            for t in ph[:20]:
-                ax.text(0.05, y, f"• {t[:92]}", fontsize=5)
-                y -= 0.018
-        ax.text(0.05, max(0.35, y), "Values Luke still needs to choose:", fontweight="bold")
-        y2 = max(0.32, y - 0.025)
-        for t in todos:
-            ax.text(0.05, y2, f"• {t[:92]}", fontsize=6)
-            y2 -= 0.02
+            fig, ax, y = _pdf_draw_wrapped_bullets(pdf, fig, ax, y, ph, fontsize=5)
+        fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y - 0.02)
+        ax.text(0.05, y, "Values Luke still needs to choose:", fontweight="bold")
+        y -= 0.025
+        fig, ax, y = _pdf_draw_wrapped_bullets(pdf, fig, ax, y, todos, fontsize=6, wrap_width=110)
+        fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y - 0.02)
         if not coupling_set:
-            ax.text(0.05, 0.15, "RTG need not computed — coupling_fraction unset.", fontsize=8)
+            ax.text(0.05, max(_PDF_NOTES_Y_MIN, y), "RTG need not computed — coupling_fraction unset.", fontsize=8)
         pdf.savefig(fig)
         plt.close(fig)
 
         if n_pack_rows:
             sweep_lines = format_n_packs_table(n_pack_rows, cfg).splitlines()
-            dy = 0.0135
+            dy = N_PACK_SWEEP_LINE_DY
 
             def _new_sweep_figure():
                 f, a = plt.subplots(figsize=(8.5, 11))
                 a.axis("off")
                 a.set_position([0, 0, 1, 1])
+                f.set_label(SWEEP_PDF_PAGE_LABEL)
                 return f, a
 
             fig, ax = _new_sweep_figure()
@@ -2099,7 +2329,7 @@ def write_report_pdf(
             y = 0.98
             for line in sweep_lines:
                 if y < 0.02:
-                    render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98)
+                    render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98, dy=dy)
                     pdf.savefig(fig)
                     plt.close(fig)
                     fig, ax = _new_sweep_figure()
@@ -2108,7 +2338,7 @@ def write_report_pdf(
                 chunk.append(line)
                 y -= dy
             if chunk:
-                render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98)
+                render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98, dy=dy)
             pdf.savefig(fig)
             plt.close(fig)
 
@@ -2123,6 +2353,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         validate_for_run(cfg)
     except DesignInputError as e:
+        layout_notes = layout_unused_input_messages(cfg)
+        if layout_notes:
+            print("\n--- layout (ignored by current layout model) ---")
+            for line in layout_notes:
+                print(f"  • {line}")
         print("Luke needs to choose (required before run):")
         for m in e.missing:
             print(f"  • {m}")
@@ -2132,12 +2367,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Config error: {e}")
         return 2
 
-    results = run_all_cases(cfg)
+    try:
+        results = run_all_cases(cfg)
+    except FinSolverError as e:
+        print(n_packs_leg_mesh_config_error(cfg, e))
+        return 2
     sensitivity = run_sensitivity(cfg)
     todos = todo_luke_list(cfg)
     coupling_set = rtg_module_enabled(cfg) and param_value(cfg, "rtg", "coupling_fraction") is not None
 
     placeholders = placeholder_list(cfg)
+    layout_notes = layout_unused_input_messages(cfg)
+    if layout_notes:
+        print("\n--- layout (ignored by current layout model) ---")
+        for line in layout_notes:
+            print(f"  • {line}")
     print(format_results_table(results, coupling_set, cfg))
     n_sens = run_n_packs_sensitivity(cfg, specific_energy=param_value(cfg, "battery", "specific_energy_wh_per_kg_high") or 200)
     print(format_n_packs_table(n_sens, cfg))

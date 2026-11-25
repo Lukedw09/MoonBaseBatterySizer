@@ -86,10 +86,10 @@ battery:
     source: "Luke's Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (sources listed there: Cold Electronics for Lunar Missions; Flight Battery Program 2010)"
     owner: luke
   pack_volumetric_energy_density_wh_per_m3:
-    value: null
+    value: 250000
     units: Wh/m^3
-    source: "Luke — pack-level volumetric energy density for box sizing"
-    owner: TODO-luke
+    source: "Luke chose ~250 Wh/L (pack-level), NASA Small Spacecraft Technology State of the Art 2026, Table 3-5 Battery (Pack) Product Table, p.44: https://www.nasa.gov/wp-content/uploads/2026/05/3-soa-power-2026-final.pdf; CubeSat-scale packs (3–34 Ah) in that table, large packs may be lower"
+    owner: luke
   pack_specific_heat_j_per_kgk:
     value: null
     units: J/kg-K

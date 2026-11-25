@@ -60,9 +60,22 @@ from sizer import (
     total_ring_radiating_area_m2,
     validate_for_run,
     write_report_pdf,
+    _pdf_format_result_block,
+    flatten_inputs,
+    placeholder_list,
+    layout_unused_input_messages,
+    n_packs_leg_mesh_config_error,
+    _PDF_RESULTS_BLOCK_DY,
+    _pdf_results_page_next_y,
     todo_luke_list,
+    figure_text_extents_pdf_scaled,
     figure_text_extents_px,
     format_n_packs_table,
+    SWEEP_PDF_PAGE_LABEL,
+    RESULTS_PDF_PAGE_LABEL,
+    SWEEP_PDF_GLYPH_WIDTH_SCALE,
+    sweep_pdf_glyph_width_scale,
+    N_PACK_SWEEP_FONT_SIZE,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -455,9 +468,7 @@ def test_dawn_warmup_energy_hand_calc(example_cfg):
 LUKE_DESIGN_BLOCKERS = sorted(
     [
         "battery.cell_nominal_voltage_v",
-        "battery.pack_volumetric_energy_density_wh_per_m3",
         "battery.packaging_insulation_mass_factor",
-        "geometry.bottom_radiates_to (Whether box bottom sees regolith or lander deck)",
         "geometry.box_height_m",
         "geometry.box_length_m",
         "geometry.box_width_m",
@@ -480,10 +491,10 @@ LUKE_DESIGN_BLOCKERS = sorted(
 )
 
 
-def test_luke_config_has_22_cli_blockers():
+def test_luke_config_has_20_cli_blockers():
     luke = load_config(LUKE_CFG)
     got = sorted(design_blockers(luke))
-    assert len(got) == 22
+    assert len(got) == 20
     assert got == LUKE_DESIGN_BLOCKERS
     with pytest.raises(DesignInputError) as err:
         validate_for_run(luke)
@@ -550,6 +561,271 @@ def _pdf_sweep_rows_by_n(pdf_text: str) -> dict[int, str]:
     return found
 
 
+def _assert_report_pdf_nasa_pack_density_citation(pdf_path: Path) -> None:
+    from pypdf import PdfReader
+
+    assert pdf_path.is_file()
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf_path).pages)
+    assert "EXAMPLE ~250 Wh/L" in text
+    assert "Table 3-5" in text
+    assert "CubeSat" in text
+    assert "Luke to confirm" not in text
+    assert "EXAMPLE pack-level ~250 kWh" not in text
+
+
+def test_examples_report_pdf_page3_nasa_pack_density_citation():
+    pytest.importorskip("pypdf")
+    committed = Path(__file__).resolve().parents[1] / "examples" / "report.pdf"
+    _assert_report_pdf_nasa_pack_density_citation(committed)
+
+
+def test_fresh_report_pdf_page3_nasa_pack_density_citation(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+
+    results = run_all_cases(example_cfg)
+    se = param_value(example_cfg, "battery", "specific_energy_wh_per_kg_high")
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=se, n_list=(1, 2, 4, 8, 16))
+    out = tmp_path / "fresh_report.pdf"
+    write_report_pdf(out, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
+    _assert_report_pdf_nasa_pack_density_citation(out)
+
+
+def test_report_pdf_includes_all_config_paths(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    results = run_all_cases(example_cfg)
+    se = param_value(example_cfg, "battery", "specific_energy_wh_per_kg_high")
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=se, n_list=(1, 2, 4, 8, 16))
+    pdf = tmp_path / "full_paths.pdf"
+    write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+
+    paths = [row["path"] for row in flatten_inputs(example_cfg)]
+    assert "rtg.enabled" in paths and "rtg.thermal_output_w" in paths
+    for path in paths:
+        assert path in text, f"missing flatten_inputs path in PDF: {path}"
+
+    blob = " ".join(text.split())
+    for row in flatten_inputs(example_cfg):
+        if row["owner"] != "placeholder":
+            continue
+        words = row["source"].split()
+        probe = " ".join(words[:5]) if len(words) >= 5 else row["source"]
+        assert probe in blob, (
+            f"placeholder bullet source missing (path {row['path']}): probe {probe!r}"
+        )
+
+
+def test_report_pdf_includes_all_result_blocks(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    results = run_all_cases(example_cfg)
+    se = param_value(example_cfg, "battery", "specific_energy_wh_per_kg_high")
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=se, n_list=(1, 2, 4, 8, 16))
+    pdf = tmp_path / "all_results.pdf"
+    write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+    for r in results:
+        block = _pdf_format_result_block(r)
+        assert block.splitlines()[0] in text, block
+        if "BELOW LiPo" in block:
+            assert "BELOW LiPo limit" in text
+
+
+def test_distributed_layout_notes_in_pdf_and_not_blockers(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    luke = load_config(LUKE_CFG)
+    luke_notes = layout_unused_input_messages(luke)
+    assert any("bottom_radiates_to" in n for n in luke_notes)
+    assert any("ring_radius_m" in n and "not used by distributed_packs layout" in n for n in luke_notes)
+    assert not any("ring_radius_m" in n and "bottom to ground" in n for n in luke_notes)
+    assert len(design_blockers(luke)) == 20
+    results = run_all_cases(example_cfg)
+    pdf = tmp_path / "layout_notes.pdf"
+    write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg))
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+    assert "not used by distributed_packs layout (bottom to ground)" in text
+
+
+@pytest.mark.parametrize(
+    "leg_overrides",
+    [
+        {"leg_length_m": 100.0},
+        {"leg_length_m": 1000.0, "leg_cross_section_m2": 1e-6},
+        {"leg_length_m": 50.0, "leg_cross_section_m2": 1e-7},
+    ],
+)
+def test_leg_bvp_bad_geometry_user_facing_config_error(example_cfg, leg_overrides):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 8
+    for key, val in leg_overrides.items():
+        cfg["lander_legs"][key]["value"] = val
+    validate_for_run(cfg)
+    try:
+        run_all_cases(cfg)
+    except FinSolverError as e:
+        msg = str(n_packs_leg_mesh_config_error(cfg, e))
+        assert "Leg thermal BVP did not converge" in msg
+        assert "did not converge" in msg
+        assert "n_packs too large" not in msg
+        assert "n_packs=8" in msg
+    else:
+        pytest.fail("expected FinSolverError")
+
+
+def test_n_packs_249_still_uses_n_packs_mesh_message(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 249
+    validate_for_run(cfg)
+    try:
+        run_all_cases(cfg)
+    except FinSolverError as e:
+        msg = str(n_packs_leg_mesh_config_error(cfg, e))
+        assert "n_packs too large for leg thermal mesh" in msg
+        assert "n_packs=249" in msg
+        assert "check leg geometry/units" not in msg
+    else:
+        pytest.fail("expected FinSolverError")
+
+
+def test_cli_blocked_prints_layout_ignored_notes(capsys):
+    from sizer import main
+
+    assert main([str(LUKE_CFG)]) == 2
+    out = capsys.readouterr().out
+    assert "layout (ignored by current layout model)" in out
+    assert "bottom_radiates_to" in out
+
+
+def test_ring_rtg_layout_requires_ring_radius_and_n_battery_boxes(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["layout"]["model"]["value"] = "ring_rtg"
+    cfg["geometry"]["ring_radius_m"] = {
+        "value": None,
+        "units": "m",
+        "source": "Luke — ring centerline radius",
+        "owner": "TODO-luke",
+    }
+    cfg["geometry"]["n_battery_boxes"] = {
+        "value": None,
+        "units": "count",
+        "source": "Luke — boxes on ring",
+        "owner": "TODO-luke",
+    }
+    missing = design_blockers(cfg)
+    assert "geometry.ring_radius_m (required for ring_rtg layout)" in missing
+    assert "geometry.n_battery_boxes (required for ring_rtg layout)" in missing
+    with pytest.raises(DesignInputError):
+        validate_for_run(cfg)
+
+
+def test_pdf_results_page_next_y_respects_tall_blocks():
+    y_top = 0.98
+    y_after = 0.72
+    assert _pdf_results_page_next_y(y_after, y_top) == pytest.approx(0.72, abs=1e-6)
+    y_after_short = 0.94
+    assert _pdf_results_page_next_y(y_after_short, y_top) == pytest.approx(
+        y_top - _PDF_RESULTS_BLOCK_DY, abs=1e-6
+    )
+
+
+def _results_page_text_ymin_ymax(fig) -> List[Tuple[float, float, str]]:
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    import matplotlib.text as mtext
+
+    if fig.canvas is None or not hasattr(fig.canvas, "get_renderer"):
+        FigureCanvasAgg(fig)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    rows: List[Tuple[float, float, str]] = []
+    for artist in fig.findobj(mtext.Text):
+        text = (artist.get_text() or "").strip()
+        if not text:
+            continue
+        bbox = artist.get_window_extent(renderer)
+        rows.append((float(bbox.y0), float(bbox.y1), text))
+    return rows
+
+
+def test_report_pdf_long_result_blocks_do_not_overlap(example_cfg, tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    import sizer
+
+    captured_figs: list = []
+    orig_block = sizer._pdf_format_result_block
+    first = [True]
+
+    def padded_block(r):
+        base = orig_block(r)
+        if first[0]:
+            first[0] = False
+            return base + "\n" + "\n".join(f"pad-line-{i}: Q_int=000W Q_loss=000W" for i in range(10))
+        return base
+
+    class _CapturingPdfPages:
+        def __init__(self, path, *args, **kwargs):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def savefig(self, fig, *args, **kwargs):
+            captured_figs.append(fig)
+
+    monkeypatch.setattr(sizer, "_pdf_format_result_block", padded_block)
+    monkeypatch.setattr("matplotlib.backends.backend_pdf.PdfPages", _CapturingPdfPages)
+
+    results = run_all_cases(example_cfg)
+    write_report_pdf(tmp_path / "overlap.pdf", example_cfg, results, [], todo_luke_list(example_cfg))
+    results_figs = [f for f in captured_figs if f.get_label() == RESULTS_PDF_PAGE_LABEL]
+    assert results_figs, "missing results page figure"
+    results_fig = results_figs[0]
+    try:
+        rows = _results_page_text_ymin_ymax(results_fig)
+        headers = [r for r in rows if "@" in r[2] and "Wh/kg" in r[2]]
+        headers.sort(key=lambda t: t[1], reverse=True)
+        assert len(headers) >= 2
+        h0_y0, h0_y1, h0_text = headers[0]
+        h1_y0, h1_y1, _ = headers[1]
+        block0_lines = [
+            r for r in rows if r[2] in h0_text or r[2].startswith("pad-line-") or h0_text.splitlines()[0] in r[2]
+        ]
+        block0_low = min(y0 for y0, _y1, _ in block0_lines)
+        assert h1_y1 <= block0_low + 2.0, (
+            f"result blocks overlap (block2 top ymax={h1_y1}, block1 bottom ymin={block0_low})"
+        )
+    finally:
+        for fig in captured_figs:
+            plt.close(fig)
+
+
+def test_n_packs_249_leg_mesh_raises_config_error(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 249
+    validate_for_run(cfg)
+    with pytest.raises(FinSolverError, match="maximum number of mesh nodes"):
+        run_all_cases(cfg)
+
+
+def test_cli_n_packs_249_leg_mesh_message(example_cfg, tmp_path, capsys):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 249
+    p = tmp_path / "n249.yaml"
+    p.write_text(yaml.dump(cfg), encoding="utf-8")
+    from sizer import main
+
+    assert main([str(p)]) == 2
+    err = capsys.readouterr().out + capsys.readouterr().err
+    assert "n_packs too large for leg thermal mesh" in err
+
+
 def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     pytest.importorskip("pypdf")
     from pypdf import PdfReader
@@ -576,13 +852,13 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     assert "BELOW LiPo limit" in text
 
 
-def _sweep_figures_from_captured(captured_figs):
-    sweep = []
-    for fig in captured_figs:
-        w_px, extents = figure_text_extents_px(fig)
-        if any("N_PACKS SENSITIVITY" in txt for _, _, txt in extents):
-            sweep.append(fig)
-    return sweep
+def test_sweep_glyph_width_scale_known_values():
+    dpi = 100.0
+    assert sweep_pdf_glyph_width_scale(7.5, dpi) == pytest.approx(1.045, rel=0.002)
+    assert SWEEP_PDF_GLYPH_WIDTH_SCALE == pytest.approx(1.045, rel=0.002)
+    assert sweep_pdf_glyph_width_scale(9.0, dpi) == pytest.approx(0.941, rel=0.002)
+    assert sweep_pdf_glyph_width_scale(10.0, dpi) == pytest.approx(1.045, rel=0.002)
+    assert sweep_pdf_glyph_width_scale(15.0, dpi) == pytest.approx(0.965, rel=0.002)
 
 
 def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatch):
@@ -615,41 +891,25 @@ def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatc
         todo_luke_list(example_cfg),
         n_pack_rows=sens,
     )
-    sweep_figs = _sweep_figures_from_captured(captured_figs)
+    assert captured_figs, "write_report_pdf did not emit any figures"
+    sweep_figs = [f for f in captured_figs if f.get_label() == SWEEP_PDF_PAGE_LABEL]
     assert sweep_figs, "write_report_pdf did not emit an n-packs sweep figure"
+    # Agg extents understate PDF width (see sweep_pdf_glyph_width_scale); cap at ~0.91 page width
+    # (~1 monospace char slack at 7.5pt/100dpi — tighten if sweep columns are added).
     try:
-        for fig in sweep_figs:
-            w_px, extents = figure_text_extents_px(fig)
+        for fig in captured_figs:
+            if fig.get_label() == SWEEP_PDF_PAGE_LABEL:
+                w_px, extents = figure_text_extents_pdf_scaled(fig)
+            else:
+                w_px, extents = figure_text_extents_px(fig)
             xmin = 0.04 * w_px
-            xmax = 0.95 * w_px
+            xmax = 0.91 * w_px
             for x0, x1, _ in extents:
                 assert x0 >= xmin - 0.5, f"text left margin too small: x0={x0} min={xmin}"
-                assert x1 <= xmax + 0.5, f"text exceeds 95%% page width: x1={x1} limit={xmax}"
+                assert x1 <= xmax + 0.5, (
+                    f"text exceeds page width: x1={x1} limit={xmax} label={fig.get_label()!r}"
+                )
     finally:
         for fig in captured_figs:
             plt.close(fig)
 
-
-def test_streamlit_app_gate_smoke():
-    pytest.importorskip("streamlit")
-    from streamlit.testing.v1 import AppTest
-
-    root = Path(__file__).resolve().parent.parent
-    app_path = root / "app.py"
-    luke = root / "config.yaml"
-    example = root / "examples" / "example_config.yaml"
-    at = AppTest.from_file(str(app_path))
-    at.run(timeout=15)
-    at.sidebar.text_input[0].set_value(str(luke)).run(timeout=15)
-    assert not at.exception
-    blocker_lines = [m.value for m in at.markdown if m.value.startswith("- `")]
-    assert len(blocker_lines) == 22
-
-    at = AppTest.from_file(str(app_path))
-    at.run(timeout=15)
-    at.sidebar.text_input[0].set_value(str(example)).run(timeout=15)
-    run_btn = next(b for b in at.sidebar.button if "Run sizing" in b.label)
-    run_btn.click().run(timeout=120)
-    assert not at.exception
-    assert at.text
-    assert "primary_5000W" in at.text[0].value

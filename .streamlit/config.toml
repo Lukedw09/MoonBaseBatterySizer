@@ -1,6 +1,0 @@
-[server]
-address = "localhost"
-showEmailPrompt = false
-
-[browser]
-gatherUsageStats = false
