@@ -158,9 +158,12 @@ def validate_for_run(cfg: Dict[str, Any], allow_incomplete: bool = False) -> Non
 
 
 def battery_efficiency_value(cfg: Dict[str, Any]) -> float:
-    if "efficiency" in cfg.get("battery", {}):
-        return param_value(cfg, "battery", "efficiency")
-    return param_value(cfg, "battery", "round_trip_efficiency")
+    bat = cfg.get("battery", {})
+    if "efficiency" in bat:
+        return float(param_value(cfg, "battery", "efficiency"))
+    if "round_trip_efficiency" in bat:
+        return float(param_value(cfg, "battery", "round_trip_efficiency"))
+    raise ConfigError("battery.efficiency must be set in config.yaml")
 
 
 def discharge_efficiency_for_sizing(eta: float, eta_definition: str) -> float:
@@ -452,35 +455,86 @@ def analytic_constant_h_fin_w(
     return m_val * (t_root - t_inf) * math.tanh(m * length_m)
 
 
+class FinSolverError(ConfigError):
+    """Radiating / linear fin BVP did not converge."""
+
+
+def _integrate_fin_heat_linear(
+    x: "np.ndarray", T: "np.ndarray", h_lin: float, perimeter_m: float, t_inf: float, k_leg: float, a_cross: float
+) -> float:
+    import numpy as np
+
+    ql = h_lin * perimeter_m * (T - t_inf)
+    return float(np.trapezoid(ql, x))
+
+
+def solve_linear_h_fin_bvp(
+    k_leg: float,
+    a_cross: float,
+    perimeter_m: float,
+    length_m: float,
+    t_root: float,
+    t_inf: float,
+    h_lin: float,
+    n_mesh: int,
+    rtol: float = 1e-5,
+) -> Tuple[float, "np.ndarray", "np.ndarray"]:
+    """Constant-h straight fin, adiabatic tip; returns Q, x, T."""
+    import numpy as np
+    from scipy.integrate import solve_bvp
+
+    ka = k_leg * a_cross
+
+    def fun(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        qlin = h_lin * perimeter_m * (y[0] - t_inf) / ka
+        return np.vstack((y[1], qlin))
+
+    def bc(ya: np.ndarray, yb: np.ndarray) -> np.ndarray:
+        return np.array([ya[0] - t_root, yb[1]])
+
+    x = np.linspace(0.0, length_m, max(3, n_mesh))
+    tg = t_inf + (t_root - t_inf) * np.cosh(np.sqrt(h_lin * perimeter_m / ka) * (length_m - x)) / np.cosh(
+        np.sqrt(h_lin * perimeter_m / ka) * length_m
+    )
+    y0 = np.vstack([tg, np.gradient(tg, x, edge_order=2)])
+    sol = solve_bvp(fun, bc, x, y0, tol=rtol, max_nodes=max(5000, 4 * n_mesh), verbose=0)
+    if not sol.success:
+        raise FinSolverError(f"Linear fin BVP failed: {sol.message}")
+    x_f = sol.x
+    T_f = sol.sol(x_f)[0]
+    q = _integrate_fin_heat_linear(x_f, T_f, h_lin, perimeter_m, t_inf, k_leg, a_cross)
+    return max(0.0, q), x_f, T_f
+
+
 def finite_difference_constant_h_fin_w(
     k_leg: float, a_cross: float, perimeter_m: float, length_m: float, t_root: float, t_inf: float,
     h_lin: float, n_nodes: int,
 ) -> float:
-    """FD linear fin (constant h, adiabatic tip). Heat reported at root."""
-    if n_nodes < 2:
-        raise ValueError("n_nodes >= 2")
-    dx = length_m / (n_nodes - 1)
-    ka = k_leg * a_cross
-    T = [t_root + (t_inf - t_root) * i / (n_nodes - 1) for i in range(n_nodes)]
-    T[0] = t_root
-    for _ in range(800):
-        Tn = T[:]
-        for i in range(1, n_nodes - 1):
-            ql = h_lin * perimeter_m * (T[i] - t_inf)
-            Tn[i] = 0.5 * (T[i - 1] + T[i + 1]) - ql * dx**2 / (2.0 * ka)
-        ql_tip = h_lin * perimeter_m * (T[-1] - t_inf)
-        Tn[-1] = T[-2] - ql_tip * dx**2 / (2.0 * ka)
-        T[0] = t_root
-        for i in range(1, n_nodes):
-            T[i] = 0.45 * Tn[i] + 0.55 * T[i]
-        if max(abs(Tn[i] - T[i]) for i in range(1, n_nodes)) < 1e-6:
-            break
-    q_sum = 0.0
-    for i in range(1, n_nodes - 1):
-        q_sum += h_lin * perimeter_m * (T[i] - t_inf) * dx
-    q_sum += h_lin * perimeter_m * (T[-1] - t_inf) * dx * 0.5
-    q_sum += h_lin * perimeter_m * (T[0] - t_inf) * dx * 0.5
-    return q_sum
+    """BVP discretization for constant-h fin (mesh size = n_nodes)."""
+    q, _, _ = solve_linear_h_fin_bvp(k_leg, a_cross, perimeter_m, length_m, t_root, t_inf, h_lin, n_nodes)
+    return q
+
+
+def _integrate_radiative_heat(
+    x: "np.ndarray",
+    T: "np.ndarray",
+    perimeter_m: float,
+    emissivity: float,
+    t_sky: float,
+    t_ground: float,
+    f_sky: float,
+    f_ground: float,
+    sigma: float,
+) -> float:
+    import numpy as np
+
+    ql = np.array(
+        [
+            radiative_loss_per_length_w(float(Ti), perimeter_m, emissivity, t_sky, t_ground, f_sky, f_ground, sigma)
+            for Ti in T
+        ]
+    )
+    return float(np.trapezoid(ql, x))
 
 
 def solve_radiating_leg_fin(
@@ -500,49 +554,51 @@ def solve_radiating_leg_fin(
     k_regolith: float,
     n_nodes: int,
     sigma: float,
+    rtol: float = 1e-5,
 ) -> Tuple[float, float, List[float]]:
-    """1-D radiating fin, fixed root T, foot via R_contact+R_regolith (not pinned to t_surf)."""
+    """Radiating leg: scipy BVP, fixed T_root, foot R_contact+R_regolith to t_surf."""
+    import numpy as np
+    from scipy.integrate import solve_bvp
+
     if n_nodes < 3 or length_m <= 0:
         return 0.0, t_surf_k, [t_root_k]
     r_foot = foot_thermal_resistance_k_per_w(footpad_area, h_contact, k_regolith)
-    g_foot = 1.0 / r_foot if r_foot > 0 and math.isfinite(r_foot) else 0.0
     ka = k_leg * a_cross
-    dx = length_m / (n_nodes - 1)
-    omega = 0.45
-    T = [t_root_k + (t_surf_k - t_root_k) * i / (n_nodes - 1) for i in range(n_nodes)]
-    T[0] = t_root_k
 
-    for _ in range(500):
-        Tn = T[:]
-        for i in range(1, n_nodes - 1):
-            ql = radiative_loss_per_length_w(
-                T[i], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
-            )
-            Tn[i] = 0.5 * (T[i - 1] + T[i + 1]) - ql * dx**2 / (2.0 * ka)
-        ql_tip = radiative_loss_per_length_w(
-            T[-1], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
-        )
-        q_f = g_foot * (T[-1] - t_surf_k)
-        Tn[-1] = T[-2] - (ql_tip * dx * 0.5 + q_f) * dx / ka
-        T[0] = t_root_k
-        for i in range(1, n_nodes):
-            T[i] = (1 - omega) * T[i] + omega * Tn[i]
-        if max(abs(Tn[i] - T[i]) for i in range(1, n_nodes)) < 1e-5:
-            break
+    def fun(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        ql = np.array(
+            [
+                radiative_loss_per_length_w(
+                    float(Ti), perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
+                )
+                for Ti in y[0]
+            ],
+            dtype=float,
+        ) / ka
+        return np.vstack((y[1], ql))
 
-    q_rad_sum = 0.0
-    for i in range(1, n_nodes - 1):
-        q_rad_sum += radiative_loss_per_length_w(
-            T[i], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
-        ) * dx
-    q_rad_sum += radiative_loss_per_length_w(
-        T[-1], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
-    ) * dx * 0.5
-    q_rad_sum += radiative_loss_per_length_w(
-        T[0], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
-    ) * dx * 0.5
-    q_foot = g_foot * (T[-1] - t_surf_k)
-    return max(0.0, q_rad_sum + q_foot), T[-1], T
+    def bc(ya: np.ndarray, yb: np.ndarray) -> np.ndarray:
+        q_foot = (yb[0] - t_surf_k) / r_foot
+        return np.array([ya[0] - t_root_k, -ka * yb[1] - q_foot])
+
+    x = np.linspace(0.0, length_m, max(3, n_nodes))
+    tg = np.linspace(t_root_k, max(t_surf_k, t_root_k * 0.5), n_nodes)
+    y0 = np.vstack([tg, np.gradient(tg, x, edge_order=2)])
+    sol = solve_bvp(fun, bc, x, y0, tol=rtol, max_nodes=max(8000, 4 * n_nodes), verbose=0)
+    if not sol.success:
+        raise FinSolverError(f"Radiating leg BVP failed (n_mesh={n_nodes}): {sol.message}")
+    max_res = float(np.max(np.abs(sol.rms_residuals))) if sol.rms_residuals is not None else 0.0
+    if max_res > max(1e-3, rtol * 100):
+        raise FinSolverError(f"Radiating leg BVP residual too large: {max_res}")
+
+    x_f = sol.x
+    T_f = sol.sol(x_f)[0]
+    q_rad = _integrate_radiative_heat(x_f, T_f, perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma)
+    t_foot = float(T_f[-1])
+    q_foot = (t_foot - t_surf_k) / r_foot if r_foot > 0 else 0.0
+    q_total = max(0.0, q_rad + q_foot)
+    profile = np.interp(np.linspace(0, length_m, n_nodes), x_f, T_f).tolist()
+    return q_total, t_foot, profile
 
 
 def legs_total_loss_w(
@@ -803,7 +859,9 @@ def solve_case(
         battery = size_battery_pack(
             load_w, p_heater, t_dark, dod, eta_dis, specific_energy, packaging, bus_v, cell_v, cell_ah
         )
-        if fallback_branch == "same_pack_survival" and primary_pack is not None:
+        if fallback_branch == "same_pack_survival":
+            if primary_pack is None:
+                raise ConfigError("same_pack_survival requires primary_pack (reuse primary mass/geometry)")
             battery.mass_kg = primary_pack.mass_kg
             battery.capacity_wh = primary_pack.capacity_wh
         if geometry_scales:

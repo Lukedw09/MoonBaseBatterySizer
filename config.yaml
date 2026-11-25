@@ -94,8 +94,8 @@ battery:
   lipo_cold_limit_k:
     value: 233
     units: K
-    source: "LiPo low-temperature limit (transient check)"
-    owner: cited-example
+    source: "Luke — Requirements doc low-temperature limit check"
+    owner: luke
   pack_specific_heat_j_per_kgk:
     value: null
     units: J/kg-K
@@ -122,11 +122,6 @@ thermal_environment:
     value: 3.4e-3
     units: W/m-K
     source: "Hayne et al. 2017 Table A1 — at ~6–7 cm depth scale"
-    owner: cited-example
-  regolith_scale_height_m:
-    value: 0.065
-    units: m
-    source: "Hayne et al. 2017 — representative gradient depth"
     owner: cited-example
   footpad_contact_conductance_w_per_m2k:
     value: 10
@@ -211,11 +206,6 @@ lander_legs:
     units: W/m-K
     source: "Ti-6Al-4V room-temperature k — tabulated in Colozza 2020"
     owner: cited-example
-  use_temperature_dependent_k:
-    value: false
-    units: boolean
-    source: "If true, use simple linear k(T) mean (optional)"
-    owner: cited-example
   leg_cross_section_m2:
     value: null
     units: m^2
@@ -244,8 +234,8 @@ lander_legs:
   leg_fin_segments:
     value: 12
     units: count
-    source: "Discretization nodes per leg for radiating fin (numerical)"
-    owner: cited-example
+    source: "BVP initial mesh node count (numerical)"
+    owner: numerical
   leg_material_sensitivity:
     - name: "Ti-6Al-4V k=6.7 (room T, Colozza table)"
       k_w_per_mk: 6.7
