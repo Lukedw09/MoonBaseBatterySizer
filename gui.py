@@ -22,7 +22,7 @@ from gui_logic import (
     run_sizing_report,
     write_sizing_pdf,
 )
-from sizer import DesignInputError
+from sizer import ConfigError, DesignInputError
 
 try:
     import tkinter as tk
@@ -163,6 +163,23 @@ class SizerGUI:
             side=tk.LEFT, padx=4
         )
 
+        self._readonly_scale_tag = "MoonBaseReadonlyScale"
+        for seq in (
+            "<Button-1>",
+            "<Button-2>",
+            "<Button-3>",
+            "<Double-Button-1>",
+            "<B1-Motion>",
+            "<B2-Motion>",
+            "<B3-Motion>",
+            "<ButtonRelease-1>",
+            "<ButtonRelease-2>",
+            "<ButtonRelease-3>",
+            "<Key>",
+            "<MouseWheel>",
+        ):
+            root.bind_class(self._readonly_scale_tag, seq, lambda _e: "break")
+
         self._build_tuning_controls()
         self.load_config()
         self.root.after_idle(self._fit_window_to_content)
@@ -215,8 +232,6 @@ class SizerGUI:
             self._scales[ui_id] = widget
             widget.pack_forget()
             unset_ph.pack(side=tk.LEFT, padx=4)
-            for seq in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>", "<Key>", "<MouseWheel>"):
-                widget.bind(seq, self._block_scale_if_readonly, add="+")
         else:
             widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
             unset_ph.pack_forget()
@@ -241,10 +256,14 @@ class SizerGUI:
             ),
         )
 
-    def _block_scale_if_readonly(self, _event: tk.Event) -> Optional[str]:
-        if not self._controls_editable:
-            return "break"
-        return None
+    def _apply_scale_readonly_tags(self, locked: bool) -> None:
+        for scale in self._scales.values():
+            tags = scale.bindtags()
+            if locked:
+                if self._readonly_scale_tag not in tags:
+                    scale.bindtags((self._readonly_scale_tag,) + tags)
+            else:
+                scale.bindtags(tuple(t for t in tags if t != self._readonly_scale_tag))
 
     def _show_control_unset(self, ui_id: str) -> None:
         widget = self._input_widgets[ui_id]
@@ -436,6 +455,7 @@ class SizerGUI:
         else:
             self.run_btn.configure(state=tk.DISABLED)
             self.pdf_btn.configure(state=tk.DISABLED)
+        self._apply_scale_readonly_tags(not enabled)
 
     def _set_results(self, text: str) -> None:
         self.results_text.configure(state=tk.NORMAL)
@@ -523,7 +543,7 @@ class SizerGUI:
             self._results_fresh = True
             self.pdf_btn.configure(state=tk.NORMAL)
         except Exception as e:
-            if isinstance(e, UiInputError):
+            if isinstance(e, (UiInputError, ConfigError)):
                 self._set_results(f"Input error:\n  • {e}")
                 self._update_run_button_state()
             else:

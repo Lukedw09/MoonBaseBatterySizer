@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Mapping, Protocol, Tuple, Union
 from sizer import (
     ConfigError,
     DesignInputError,
+    FinSolverError,
     design_blockers,
     format_n_packs_table,
     format_results_table,
@@ -18,6 +19,7 @@ from sizer import (
     run_n_packs_sensitivity,
     rtg_module_enabled,
     validate_for_run,
+    n_packs_leg_mesh_config_error,
     validate_radiator_temperature,
     write_report_pdf,
 )
@@ -168,7 +170,10 @@ def run_sizing_report(
     """Return (working_cfg, text_table, case_results, n_pack_sens rows)."""
     cfg = build_working_cfg(base_cfg, control_values)
     validate_for_run(cfg)
-    results = run_all_cases(cfg)
+    try:
+        results = run_all_cases(cfg)
+    except FinSolverError as e:
+        raise n_packs_leg_mesh_config_error(cfg, e) from e
     coupling = rtg_module_enabled(cfg) and param_value(cfg, "rtg", "coupling_fraction") is not None
     se_high = float(collect_ui_values(control_values)[("battery", "specific_energy_wh_per_kg_high")])
     sens = run_n_packs_sensitivity(cfg, specific_energy=se_high, n_list=(1, 2, 4, 8, 16))

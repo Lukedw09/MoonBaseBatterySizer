@@ -60,6 +60,8 @@ from sizer import (
     total_ring_radiating_area_m2,
     validate_for_run,
     write_report_pdf,
+    flatten_inputs,
+    placeholder_list,
     todo_luke_list,
     figure_text_extents_pdf_scaled,
     format_n_packs_table,
@@ -553,18 +555,74 @@ def _pdf_sweep_rows_by_n(pdf_text: str) -> dict[int, str]:
     return found
 
 
-def test_examples_report_pdf_page3_nasa_pack_density_citation():
-    pytest.importorskip("pypdf")
+def _assert_report_pdf_nasa_pack_density_citation(pdf_path: Path) -> None:
     from pypdf import PdfReader
 
-    pdf = Path(__file__).resolve().parents[1] / "examples" / "report.pdf"
-    assert pdf.is_file()
-    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+    assert pdf_path.is_file()
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf_path).pages)
     assert "EXAMPLE ~250 Wh/L" in text
     assert "Table 3-5" in text
     assert "CubeSat" in text
     assert "Luke to confirm" not in text
     assert "EXAMPLE pack-level ~250 kWh" not in text
+
+
+def test_examples_report_pdf_page3_nasa_pack_density_citation():
+    pytest.importorskip("pypdf")
+    committed = Path(__file__).resolve().parents[1] / "examples" / "report.pdf"
+    _assert_report_pdf_nasa_pack_density_citation(committed)
+
+
+def test_fresh_report_pdf_page3_nasa_pack_density_citation(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+
+    results = run_all_cases(example_cfg)
+    se = param_value(example_cfg, "battery", "specific_energy_wh_per_kg_high")
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=se, n_list=(1, 2, 4, 8, 16))
+    out = tmp_path / "fresh_report.pdf"
+    write_report_pdf(out, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
+    _assert_report_pdf_nasa_pack_density_citation(out)
+
+
+def test_report_pdf_includes_all_config_paths(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    results = run_all_cases(example_cfg)
+    se = param_value(example_cfg, "battery", "specific_energy_wh_per_kg_high")
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=se, n_list=(1, 2, 4, 8, 16))
+    pdf = tmp_path / "full_paths.pdf"
+    write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+
+    paths = [row["path"] for row in flatten_inputs(example_cfg)]
+    assert "rtg.enabled" in paths and "rtg.thermal_output_w" in paths
+    for path in paths:
+        assert path in text, f"missing flatten_inputs path in PDF: {path}"
+
+    for line in placeholder_list(example_cfg):
+        ph_path = line.split(":", 1)[0]
+        assert ph_path in text, f"missing placeholder path in PDF: {ph_path}"
+
+
+def test_n_packs_249_leg_mesh_raises_config_error(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 249
+    validate_for_run(cfg)
+    with pytest.raises(FinSolverError, match="maximum number of mesh nodes"):
+        run_all_cases(cfg)
+
+
+def test_cli_n_packs_249_leg_mesh_message(example_cfg, tmp_path, capsys):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 249
+    p = tmp_path / "n249.yaml"
+    p.write_text(yaml.dump(cfg), encoding="utf-8")
+    from sizer import main
+
+    assert main([str(p)]) == 2
+    err = capsys.readouterr().out + capsys.readouterr().err
+    assert "n_packs too large for leg thermal mesh" in err
 
 
 def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):

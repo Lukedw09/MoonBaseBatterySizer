@@ -2052,6 +2052,57 @@ def _pdf_notes_continuation(
     return fig, ax, 0.95
 
 
+def _pdf_draw_plain_lines(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+    lines: List[str],
+    *,
+    fontsize: float = 5,
+    dy: float = _PDF_NOTES_LINE_DY,
+    family: Optional[str] = None,
+) -> Tuple[Any, Any, float]:
+    for line in lines:
+        fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+        kwargs: Dict[str, Any] = {"fontsize": fontsize}
+        if family:
+            kwargs["family"] = family
+        ax.text(0.05, y, line, **kwargs)
+        y -= dy
+    return fig, ax, y
+
+
+def _pdf_format_result_block(r: "CaseResult") -> str:
+    block = (
+        f"{r.load_name}/{r.case} @ {r.specific_energy_wh_kg} Wh/kg\n"
+        f" mass={r.battery.mass_kg:.0f}kg Q_int={r.q_internal_w:.0f}W Q_loss={r.thermal.q_total_w:.0f}W"
+    )
+    if r.q_rtg_total_w is not None:
+        block += f" Q_RTG={r.q_rtg_total_w:.0f}W"
+    if r.q_excess_w > 0:
+        block += f" EXCESS={r.q_excess_w:.0f}W"
+    if r.transient_delta_t_k is not None:
+        block += f" dT={r.transient_delta_t_k:.1f}K"
+    if r.case == "cold_shutdown" and r.coast_t_final_k is not None:
+        block += f" Tf_closed={r.coast_t_final_k:.1f}K"
+        if r.coast_stuck_open_t_final_k is not None:
+            block += f" Tf_stuck={r.coast_stuck_open_t_final_k:.1f}K"
+            if r.louvers_stuck_below_lipo and r.coast_stuck_open_margin_lipo_k is not None:
+                block += f" BELOW LiPo limit margin={r.coast_stuck_open_margin_lipo_k:.1f}K"
+    if r.dawn_warmup_energy_wh:
+        block += f" warm={r.dawn_warmup_energy_wh/1000:.1f}kWh"
+    return block
+
+
+def n_packs_leg_mesh_config_error(cfg: Dict[str, Any], err: FinSolverError) -> ConfigError:
+    n = param_value(cfg, "geometry", "n_packs")
+    return ConfigError(
+        f"n_packs too large for leg thermal mesh at n_packs={n} "
+        f"(radiator/leg BVP did not converge — try lowering pack count): {err}"
+    )
+
+
 def _pdf_draw_wrapped_bullets(
     pdf: Any,
     fig: Any,
@@ -2099,38 +2150,20 @@ def write_report_pdf(
             va="top",
         )
         y = 0.86
-        for row in flatten_inputs(cfg)[:50]:
-            ax.text(0.05, y, f"{row['path']}: {row['value']} [{row['owner']}]", fontsize=5, family="monospace")
-            y -= 0.016
-            if y < 0.05:
-                break
+        input_lines = [
+            f"{row['path']}: {row['value']} [{row['owner']}]" for row in flatten_inputs(cfg)
+        ]
+        fig, ax, _y = _pdf_draw_plain_lines(
+            pdf, fig, ax, y, input_lines, fontsize=5, dy=0.016, family="monospace"
+        )
         pdf.savefig(fig)
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8.5, 11))
         ax.axis("off")
         y = 0.98
-        for r in results[:18]:
-            block = (
-                f"{r.load_name}/{r.case} @ {r.specific_energy_wh_kg} Wh/kg\n"
-                f" mass={r.battery.mass_kg:.0f}kg Q_int={r.q_internal_w:.0f}W Q_loss={r.thermal.q_total_w:.0f}W"
-            )
-            if r.q_rtg_total_w is not None:
-                block += f" Q_RTG={r.q_rtg_total_w:.0f}W"
-            if r.q_excess_w > 0:
-                block += f" EXCESS={r.q_excess_w:.0f}W"
-            if r.transient_delta_t_k is not None:
-                block += f" dT={r.transient_delta_t_k:.1f}K"
-            if r.case == "cold_shutdown" and r.coast_t_final_k is not None:
-                block += f" Tf_closed={r.coast_t_final_k:.1f}K"
-                if r.coast_stuck_open_t_final_k is not None:
-                    block += f" Tf_stuck={r.coast_stuck_open_t_final_k:.1f}K"
-                    if r.louvers_stuck_below_lipo and r.coast_stuck_open_margin_lipo_k is not None:
-                        block += (
-                            f" BELOW LiPo limit margin={r.coast_stuck_open_margin_lipo_k:.1f}K"
-                        )
-            if r.dawn_warmup_energy_wh:
-                block += f" warm={r.dawn_warmup_energy_wh/1000:.1f}kWh"
+        for block in (_pdf_format_result_block(r) for r in results):
+            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y - 0.06)
             ax.text(0.05, y, block, fontsize=7, family="monospace", va="top")
             y -= 0.055
             y -= 0.02
@@ -2144,7 +2177,7 @@ def write_report_pdf(
         if ph:
             ax.text(0.05, y, "placeholder values (not Luke design):", fontweight="bold")
             y -= 0.025
-            fig, ax, y = _pdf_draw_wrapped_bullets(pdf, fig, ax, y, ph[:20], fontsize=5)
+            fig, ax, y = _pdf_draw_wrapped_bullets(pdf, fig, ax, y, ph, fontsize=5)
         fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y - 0.02)
         ax.text(0.05, y, "Values Luke still needs to choose:", fontweight="bold")
         y -= 0.025
@@ -2204,7 +2237,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Config error: {e}")
         return 2
 
-    results = run_all_cases(cfg)
+    try:
+        results = run_all_cases(cfg)
+    except FinSolverError as e:
+        print(n_packs_leg_mesh_config_error(cfg, e))
+        return 2
     sensitivity = run_sensitivity(cfg)
     todos = todo_luke_list(cfg)
     coupling_set = rtg_module_enabled(cfg) and param_value(cfg, "rtg", "coupling_fraction") is not None

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import gui_logic
-from sizer import load_config, param_value
+from sizer import ConfigError, load_config, param_value
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "example_config.yaml"
@@ -131,6 +131,17 @@ def test_app_gate_blocks_radiator_above_box_temperature(example_cfg):
     assert blocked
     assert any("radiator_temperature_k" in m for m in messages)
     assert any("≤" in m or "<=" in m for m in messages)
+
+
+def test_n_packs_249_run_sizing_report_raises_leg_mesh_error(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    controls = {
+        ui_id: _FakeVar(param_value(example_cfg, *keys))
+        for ui_id, keys in gui_logic.UI_CONTROL_TO_CFG_KEYS.items()
+    }
+    controls["n_packs"] = _FakeVar("249")
+    with pytest.raises(ConfigError, match="n_packs too large for leg thermal mesh"):
+        gui_logic.run_sizing_report(cfg, controls)
 
 
 def test_parse_ui_n_packs_range_and_integer():

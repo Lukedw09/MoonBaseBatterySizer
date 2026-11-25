@@ -203,7 +203,29 @@ def test_luke_blocked_yaml_unset_controls_not_invented_values():
     root.destroy()
 
 
-def test_blocked_scale_interaction_does_not_change_value_or_owner():
+def _assert_blocked_scale_ignores_interaction(scale, owner_label, v0: float) -> None:
+    import tkinter as tk
+
+    cap_before = owner_label.cget("text")
+    w = max(scale.winfo_width(), 80)
+    for seq in (
+        ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"),
+        ("<Button-2>", "<B2-Motion>", "<ButtonRelease-2>"),
+        ("<Button-3>", "<B3-Motion>", "<ButtonRelease-3>"),
+    ):
+        scale.event_generate(seq[0], x=40, y=8)
+        scale.event_generate(seq[1], x=w - 10, y=8)
+        scale.event_generate(seq[2], x=w - 10, y=8)
+    scale.event_generate("<Key>", keysym="Right")
+    scale.event_generate("<Key>", keysym="Up")
+    scale.event_generate("<MouseWheel>", delta=120)
+    scale.update_idletasks()
+    assert float(scale.get()) == pytest.approx(v0)
+    assert owner_label.cget("text") == cap_before
+    assert "ui-override" not in cap_before
+
+
+def test_blocked_scales_ignore_mouse_keys_and_wheel():
     import tkinter as tk
 
     from gui import SizerGUI
@@ -214,16 +236,29 @@ def test_blocked_scale_interaction_does_not_change_value_or_owner():
     app = SizerGUI(root, config_path=LUKE_CFG)
     root.update()
     assert not app._controls_editable
-    eff = app._scales["efficiency"]
-    v0 = float(eff.get())
-    cap_before = app._owner_labels["efficiency"].cget("text")
-    eff.event_generate("<Button-1>", x=40, y=8)
-    eff.event_generate("<B1-Motion>", x=eff.winfo_width() - 10, y=8)
-    eff.event_generate("<ButtonRelease-1>", x=eff.winfo_width() - 10, y=8)
+    for ui_id in ("depth_of_discharge", "efficiency"):
+        scale = app._scales[ui_id]
+        _assert_blocked_scale_ignores_interaction(
+            scale, app._owner_labels[ui_id], float(scale.get())
+        )
+    root.destroy()
+
+
+def test_run_sizing_n_packs_249_shows_leg_mesh_error():
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG)
     root.update()
-    assert float(eff.get()) == pytest.approx(v0)
-    assert app._owner_labels["efficiency"].cget("text") == cap_before
-    assert "ui-override" not in cap_before
+    app.controls["n_packs"].set("249")
+    app.run_sizing()
+    root.update()
+    body = app.results_text.get("1.0", tk.END)
+    assert "n_packs too large for leg thermal mesh" in body
     root.destroy()
 
 
@@ -245,16 +280,27 @@ def test_invalid_primary_w_caption_and_run_disabled():
     root.destroy()
 
 
-def test_save_pdf_disabled_then_reflects_n_packs_after_rerun(tmp_path, monkeypatch):
+def test_save_pdf_passes_last_working_cfg_not_live_controls(tmp_path, monkeypatch):
     pytest.importorskip("pypdf")
     import tkinter as tk
     from pypdf import PdfReader
 
     import gui
+    import gui_logic
     from gui import SizerGUI
     from gui_logic import EXAMPLE_CFG
+    from sizer import param_value
 
     out_pdf = tmp_path / "gui_saved.pdf"
+    captured: list = []
+    real_write = gui_logic.write_sizing_pdf
+
+    def spy_write(path, cfg, results, sens):
+        captured.append(cfg)
+        real_write(path, cfg, results, sens)
+
+    monkeypatch.setattr(gui_logic, "write_sizing_pdf", spy_write)
+    monkeypatch.setattr(gui, "write_sizing_pdf", spy_write)
     monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **kw: str(out_pdf))
     monkeypatch.setattr(gui.messagebox, "showinfo", lambda *a, **k: None)
     monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: None)
@@ -263,16 +309,21 @@ def test_save_pdf_disabled_then_reflects_n_packs_after_rerun(tmp_path, monkeypat
     root.withdraw()
     app = SizerGUI(root, config_path=EXAMPLE_CFG)
     root.update()
+    app.controls["n_packs"].set("2")
     app.run_sizing()
     root.update()
-    assert str(app.pdf_btn.cget("state")) == tk.NORMAL
-    app.controls["n_packs"].set("2")
+    assert param_value(app.last_working_cfg, "geometry", "n_packs") == 2
+    app.controls["n_packs"].set("32")
     root.update()
     assert str(app.pdf_btn.cget("state")) == tk.DISABLED
-    app.run_sizing()
-    root.update()
-    assert app.controls["n_packs"].get() == "2"
+    # If stale guard were removed, save must still pass last_working_cfg (not live widgets).
+    app._results_fresh = True
+    app.pdf_btn.configure(state=tk.NORMAL)
     app.save_pdf()
+    assert len(captured) == 1
+    assert captured[0] is app.last_working_cfg
+    assert param_value(captured[0], "geometry", "n_packs") == 2
+    assert param_value(captured[0], "geometry", "n_packs") != 32
     text = "\n".join((p.extract_text() or "") for p in PdfReader(out_pdf).pages)
     assert "geometry.n_packs: 2" in text
     root.destroy()
