@@ -61,8 +61,10 @@ from sizer import (
     validate_for_run,
     write_report_pdf,
     todo_luke_list,
-    figure_text_extents_px,
+    figure_text_extents_pdf_scaled,
     format_n_packs_table,
+    SWEEP_PDF_PAGE_LABEL,
+    SWEEP_PDF_GLYPH_WIDTH_SCALE,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -576,15 +578,6 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     assert "BELOW LiPo limit" in text
 
 
-def _sweep_figures_from_captured(captured_figs):
-    sweep = []
-    for fig in captured_figs:
-        w_px, extents = figure_text_extents_px(fig)
-        if any("N_PACKS SENSITIVITY" in txt for _, _, txt in extents):
-            sweep.append(fig)
-    return sweep
-
-
 def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
 
@@ -615,16 +608,20 @@ def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatc
         todo_luke_list(example_cfg),
         n_pack_rows=sens,
     )
-    sweep_figs = _sweep_figures_from_captured(captured_figs)
+    sweep_figs = [f for f in captured_figs if f.get_label() == SWEEP_PDF_PAGE_LABEL]
     assert sweep_figs, "write_report_pdf did not emit an n-packs sweep figure"
+    # Agg extents understate PDF width (~6.0 vs ~6.27 px/char); scale then cap at ~0.91 page width.
     try:
         for fig in sweep_figs:
-            w_px, extents = figure_text_extents_px(fig)
+            w_px, extents = figure_text_extents_pdf_scaled(fig)
             xmin = 0.04 * w_px
-            xmax = 0.95 * w_px
+            xmax = 0.91 * w_px
             for x0, x1, _ in extents:
                 assert x0 >= xmin - 0.5, f"text left margin too small: x0={x0} min={xmin}"
-                assert x1 <= xmax + 0.5, f"text exceeds 95%% page width: x1={x1} limit={xmax}"
+                assert x1 <= xmax + 0.5, (
+                    f"text exceeds PDF-adjusted page width: x1={x1} limit={xmax} "
+                    f"(scale={SWEEP_PDF_GLYPH_WIDTH_SCALE})"
+                )
     finally:
         for fig in captured_figs:
             plt.close(fig)

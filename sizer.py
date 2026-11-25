@@ -17,6 +17,14 @@ import yaml
 
 SIGMA_DEFAULT = 5.670374419e-8
 
+# n-packs sweep PDF layout (shared by write_report_pdf and layout tests).
+N_PACK_SWEEP_LINE_DY = 0.0135
+N_PACK_SWEEP_FONT_SIZE = 7.5
+N_PACK_SWEEP_X_FRAC = 0.06
+SWEEP_PDF_PAGE_LABEL = "moonbase_n_pack_sweep"
+# Agg window extents round monospace ~6.0 px/char; embedded PDF is closer to ~6.27 px/char at 7.5 pt.
+SWEEP_PDF_GLYPH_WIDTH_SCALE = 6.27 / 6.0
+
 # Paths that must be set (value not null) before a full sizing run.
 DESIGN_PATHS = [
     ("layout", "model"),
@@ -1944,9 +1952,9 @@ def render_n_pack_sweep_lines_on_figure(
     sweep_lines: List[str],
     *,
     start_y: float = 0.98,
-    sweep_fs: float = 7.5,
-    dy: float = 0.0135,
-    x_frac: float = 0.06,
+    sweep_fs: float = N_PACK_SWEEP_FONT_SIZE,
+    dy: float = N_PACK_SWEEP_LINE_DY,
+    x_frac: float = N_PACK_SWEEP_X_FRAC,
 ) -> float:
     """Draw monospace sweep lines using figure coords (full page width). Returns final y."""
     y = start_y
@@ -1962,17 +1970,6 @@ def render_n_pack_sweep_lines_on_figure(
         )
         y -= dy
     return y
-
-
-def build_n_pack_sweep_figure(sweep_lines: List[str]):
-    """Build a single-page sweep figure (for tests and layout checks)."""
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(8.5, 11))
-    ax.axis("off")
-    ax.set_position([0, 0, 1, 1])
-    render_n_pack_sweep_lines_on_figure(fig, sweep_lines)
-    return fig
 
 
 def figure_text_extents_px(fig) -> Tuple[float, List[Tuple[float, float, str]]]:
@@ -1996,6 +1993,17 @@ def figure_text_extents_px(fig) -> Tuple[float, List[Tuple[float, float, str]]]:
         bbox = artist.get_window_extent(renderer)
         rows.append((float(bbox.x0), float(bbox.x1), artist.get_text() or ""))
     return w_px, rows
+
+
+def figure_text_extents_pdf_scaled(
+    fig,
+) -> Tuple[float, List[Tuple[float, float, str]]]:
+    """Like figure_text_extents_px but scale line width for PDF monospace vs Agg screen rounding."""
+    w_px, rows = figure_text_extents_px(fig)
+    scaled = [
+        (x0, x0 + (x1 - x0) * SWEEP_PDF_GLYPH_WIDTH_SCALE, txt) for x0, x1, txt in rows
+    ]
+    return w_px, scaled
 
 
 def write_report_pdf(
@@ -2086,12 +2094,13 @@ def write_report_pdf(
 
         if n_pack_rows:
             sweep_lines = format_n_packs_table(n_pack_rows, cfg).splitlines()
-            dy = 0.0135
+            dy = N_PACK_SWEEP_LINE_DY
 
             def _new_sweep_figure():
                 f, a = plt.subplots(figsize=(8.5, 11))
                 a.axis("off")
                 a.set_position([0, 0, 1, 1])
+                f.set_label(SWEEP_PDF_PAGE_LABEL)
                 return f, a
 
             fig, ax = _new_sweep_figure()
@@ -2099,7 +2108,7 @@ def write_report_pdf(
             y = 0.98
             for line in sweep_lines:
                 if y < 0.02:
-                    render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98)
+                    render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98, dy=dy)
                     pdf.savefig(fig)
                     plt.close(fig)
                     fig, ax = _new_sweep_figure()
@@ -2108,7 +2117,7 @@ def write_report_pdf(
                 chunk.append(line)
                 y -= dy
             if chunk:
-                render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98)
+                render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98, dy=dy)
             pdf.savefig(fig)
             plt.close(fig)
 
