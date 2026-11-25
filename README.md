@@ -34,7 +34,7 @@ pip install -r requirements.txt
 python3 gui.py
 ```
 
-Default config is **EXAMPLE ONLY** (`examples/example_config.yaml`). Load another YAML path at the top if needed. Sliders adjust loads, pack count, volumetric density, temperatures, and wake-panel inputs; **Run sizing** fills the results box (including the **n_packs** sweep with `*` / `!` flags). **Save PDF** writes the same report as the CLI.
+On first open the app loads **`config.yaml`** (Luke’s file) when it is present; incomplete fields show the **design blockers** list. Use **Load EXAMPLE config…** or point the path at `examples/example_config.yaml` to run the runnable demo. Sliders adjust loads, pack count, volumetric density, temperatures, and wake-panel inputs; **Run sizing** fills the results box (including the **n_packs** sweep with `*` / `!` flags). **Save PDF** writes the same report as the CLI.
 
 Incomplete configs (for example `config.yaml` before Luke fills required fields) show the **design blockers** list only — there is no way to run sizing until the YAML is complete.
 

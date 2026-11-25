@@ -1,120 +1,55 @@
 #!/usr/bin/env python3
-"""Tkinter desktop UI for Moon Base pack + radiator sizer (EXAMPLE config by default)."""
+"""Tkinter desktop UI for Moon Base pack + radiator sizer."""
 
 from __future__ import annotations
 
 import copy
 import sys
-import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
-from sizer import (
-    DesignInputError,
-    design_blockers,
-    format_n_packs_table,
-    format_results_table,
+from gui_logic import (
+    EXAMPLE_CFG,
+    UI_CONTROL_TO_CFG_KEYS,
+    app_gate_blocked,
+    apply_ui_values,
+    build_working_cfg,
+    default_config_path,
+    effective_owner_label,
     load_config,
-    param_value,
-    run_all_cases,
-    run_n_packs_sensitivity,
-    rtg_module_enabled,
-    validate_for_run,
-    write_report_pdf,
+    require_param,
+    run_sizing_report,
+    write_sizing_pdf,
 )
 
-EXAMPLE = Path(__file__).resolve().parent / "examples" / "example_config.yaml"
-
-# Maps stable UI control id -> YAML param path (for tests and apply_if_changed).
-UI_CONTROL_TO_CFG_KEYS: Dict[str, Tuple[str, ...]] = {
-    "n_packs": ("geometry", "n_packs"),
-    "primary_w": ("loads", "primary_w"),
-    "t_dark_h": ("night", "t_dark_h"),
-    "specific_energy_wh_per_kg_low": ("battery", "specific_energy_wh_per_kg_low"),
-    "specific_energy_wh_per_kg_high": ("battery", "specific_energy_wh_per_kg_high"),
-    "pack_volumetric_energy_density_wh_per_m3": (
-        "battery",
-        "pack_volumetric_energy_density_wh_per_m3",
-    ),
-    "depth_of_discharge": ("battery", "depth_of_discharge"),
-    "efficiency": ("battery", "efficiency"),
-    "packaging_insulation_mass_factor": ("battery", "packaging_insulation_mass_factor"),
-    "box_target_temperature_k": ("battery", "box_target_temperature_k"),
-    "radiator_temperature_k": ("radiator", "radiator_temperature_k"),
-    "radiator_emissivity": ("radiator", "radiator_emissivity"),
-    "warm_up_h": ("wake_up", "warm_up_h"),
-    "panel_efficiency": ("wake_up", "panel_efficiency"),
-    "sun_incidence_cosine": ("wake_up", "sun_incidence_cosine"),
-}
+try:
+    import tkinter as tk
+except ImportError:  # pragma: no cover - headless CI may lack tkinter
+    tk = None  # type: ignore[misc, assignment]
 
 
-def leaf_owner(cfg: dict, *keys: str) -> str:
-    node = cfg
-    for k in keys:
-        node = node[k]
-    if isinstance(node, dict):
-        return str(node.get("owner") or "")
-    return ""
-
-
-def effective_owner_label(base_cfg: dict, *keys: str, current_value: Any) -> str:
-    base_val = param_value(base_cfg, *keys)
-    prior = leaf_owner(base_cfg, *keys) or "unknown"
-    if base_val is not None and current_value == base_val:
-        return prior
-    if prior.startswith("ui-override"):
-        return prior
-    return f"ui-override (was {prior})"
-
-
-def apply_if_changed(base_cfg: dict, cfg: dict, *keys: str, new_value: Any) -> None:
-    base_val = param_value(base_cfg, *keys)
-    path = cfg
-    for k in keys[:-1]:
-        path = path[k]
-    leaf = path[keys[-1]]
-    if not isinstance(leaf, dict):
-        path[keys[-1]] = new_value
-        return
-    if base_val is not None and new_value == base_val:
-        return
-    prior = leaf.get("owner") or "unknown"
-    leaf["value"] = new_value
-    leaf["owner"] = f"ui-override (was {prior})" if prior != "ui-override" else "ui-override"
-
-
-def app_gate_blocked(cfg: dict) -> Tuple[bool, List[str]]:
-    """True when design is incomplete — matches Streamlit gate (blockers first, then validate_for_run)."""
-    blockers = design_blockers(cfg)
-    if blockers:
-        return True, blockers
-    try:
-        validate_for_run(cfg)
-    except DesignInputError as e:
-        return True, list(e.missing)
-    return False, []
-
-
-def collect_ui_values(controls: Dict[str, tk.Variable]) -> Dict[Tuple[str, ...], Any]:
-    """Read widget variables into cfg key tuples (same set app.py wrote)."""
-    values: Dict[Tuple[str, ...], Any] = {}
-    for ui_id, keys in UI_CONTROL_TO_CFG_KEYS.items():
-        raw = controls[ui_id].get()
-        values[keys] = int(raw) if ui_id == "n_packs" else float(raw)
-    return values
-
-
-def apply_ui_values(base_cfg: dict, cfg: dict, controls: Dict[str, tk.Variable]) -> None:
-    for keys, val in collect_ui_values(controls).items():
-        apply_if_changed(base_cfg, cfg, *keys, new_value=val)
-
-
-def _require_param(cfg: dict, *keys: str) -> Any:
-    v = param_value(cfg, *keys)
-    if v is None:
-        raise DesignInputError([f"{'.'.join(keys)}"])
-    return v
+def _horizontal_scale(
+    parent: tk.Misc,
+    var: tk.Variable,
+    *,
+    from_: float,
+    to: float,
+    resolution: float,
+    length: int = 220,
+) -> tk.Scale:
+    digits = 0 if isinstance(var, tk.IntVar) else 3
+    return tk.Scale(
+        parent,
+        variable=var,
+        from_=from_,
+        to=to,
+        resolution=resolution,
+        orient=tk.HORIZONTAL,
+        length=length,
+        showvalue=True,
+        digits=digits,
+    )
 
 
 class SizerGUI:
@@ -123,19 +58,24 @@ class SizerGUI:
         self.root.title("Moon Base Battery Sizer")
         self.root.minsize(960, 640)
         self.base_cfg: Optional[dict] = None
-        self.cfg: Optional[dict] = None
+        self.loaded_path: Optional[Path] = None
         self.last_results = None
         self.last_sens = None
+        self.last_working_cfg: Optional[dict] = None
         self.controls: Dict[str, tk.Variable] = {}
+        self._scales: Dict[str, tk.Scale] = {}
         self._owner_labels: Dict[str, tk.Label] = {}
         self._tuning_widgets: List[tk.Widget] = []
 
         top = ttk.Frame(root, padding=8)
         top.pack(fill=tk.X)
         ttk.Label(top, text="Config YAML:").pack(side=tk.LEFT)
-        self.path_var = tk.StringVar(value=str(config_path or EXAMPLE))
+        start_path = config_path if config_path is not None else default_config_path()
+        self.path_var = tk.StringVar(value=str(start_path))
         ttk.Entry(top, textvariable=self.path_var, width=60).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         ttk.Button(top, text="Load config", command=self.load_config).pack(side=tk.LEFT)
+        self.loaded_label = ttk.Label(top, text="", font=("TkDefaultFont", 9, "italic"))
+        self.loaded_label.pack(side=tk.LEFT, padx=8)
 
         paned = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
@@ -172,10 +112,17 @@ class SizerGUI:
         btn_row.pack(fill=tk.X, pady=6)
         self.run_btn = ttk.Button(btn_row, text="Run sizing", command=self.run_sizing)
         self.run_btn.pack(side=tk.LEFT, padx=4)
-        self.pdf_btn = ttk.Button(btn_row, text="Save PDF", command=self.save_pdf)
+        self.pdf_btn = ttk.Button(btn_row, text="Save PDF", command=self.save_pdf, state=tk.DISABLED)
         self.pdf_btn.pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Load EXAMPLE config…", command=self._pick_example_config).pack(
+            side=tk.LEFT, padx=4
+        )
 
         self._build_tuning_controls()
+        self.load_config()
+
+    def _pick_example_config(self) -> None:
+        self.path_var.set(str(EXAMPLE_CFG))
         self.load_config()
 
     def _add_control(
@@ -195,16 +142,21 @@ class SizerGUI:
         own.pack(side=tk.LEFT, padx=6)
         self._owner_labels[ui_id] = own
         self.controls[ui_id] = var
+        if isinstance(widget, tk.Scale):
+            widget.set(float(var.get()) if not isinstance(var, tk.IntVar) else int(var.get()))
+            self._scales[ui_id] = widget
         self._tuning_widgets.extend([row, widget, own])
         var.trace_add("write", lambda *_: self._refresh_owner_caption(ui_id))
 
     def _build_tuning_controls(self) -> None:
-        ttk.Label(self.tuning_frame, text="Tuning (ui-override only when changed)", font=("TkDefaultFont", 10, "bold")).pack(
-            anchor=tk.W, pady=(0, 8)
-        )
+        ttk.Label(
+            self.tuning_frame,
+            text="Tuning (ui-override only when changed)",
+            font=("TkDefaultFont", 10, "bold"),
+        ).pack(anchor=tk.W, pady=(0, 8))
 
         def scale(row: ttk.Frame, var: tk.Variable, from_, to, resolution=1.0) -> tk.Widget:
-            return tk.Scale(row, variable=var, from_=from_, to=to, resolution=resolution, orient=tk.HORIZONTAL, length=220)
+            return _horizontal_scale(row, var, from_=from_, to=to, resolution=resolution)
 
         self._add_control(
             "n_packs",
@@ -245,14 +197,14 @@ class SizerGUI:
         self._add_control(
             "depth_of_discharge",
             "Depth of discharge",
-            tk.DoubleVar(value=0.9),
-            build=lambda r, v: scale(r, v, 0.1, 1.0, 0.01),
+            tk.DoubleVar(value=0.8),
+            build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
         )
         self._add_control(
             "efficiency",
             "Discharge η",
             tk.DoubleVar(value=0.9),
-            build=lambda r, v: scale(r, v, 0.5, 1.0, 0.01),
+            build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
         )
         self._add_control(
             "packaging_insulation_mass_factor",
@@ -318,7 +270,6 @@ class SizerGUI:
             except tk.TclError:
                 pass
         self.run_btn.configure(state=state)
-        self.pdf_btn.configure(state=tk.DISABLED if not enabled else tk.NORMAL)
 
     def _set_results(self, text: str) -> None:
         self.results_text.configure(state=tk.NORMAL)
@@ -326,53 +277,58 @@ class SizerGUI:
         self.results_text.insert(tk.END, text)
         self.results_text.configure(state=tk.DISABLED)
 
+    def _show_loaded_path(self, path: Path) -> None:
+        self.loaded_path = path
+        self.loaded_label.configure(text=f"Loaded: {path.name}")
+
     def load_config(self) -> None:
+        self.pdf_btn.configure(state=tk.DISABLED)
+        self.last_results = None
+        self.last_sens = None
         try:
             path = Path(self.path_var.get().strip())
             self.base_cfg = load_config(path)
+            self._show_loaded_path(path)
         except Exception as e:
             self.base_cfg = None
-            self.cfg = None
+            self.loaded_path = None
+            self.loaded_label.configure(text="")
             self._set_tuning_state(False)
             self._set_results(f"Could not load config:\n{e}")
             return
 
         blocked, messages = app_gate_blocked(self.base_cfg)
         if blocked:
-            self.cfg = None
             self._set_tuning_state(False)
-            lines = ["Design incomplete — fix these before tuning or run:\n"]
+            lines = [f"Loaded: {path.name}", "", "Design incomplete — fix these before tuning or run:\n"]
             lines.extend(f"  • {m}" for m in messages)
-            lines.append("\nUse examples/example_config.yaml for a complete EXAMPLE ONLY config.")
+            lines.append("\nUse “Load EXAMPLE config…” or examples/example_config.yaml for a runnable demo.")
             self._set_results("\n".join(lines))
             return
 
-        self.cfg = copy.deepcopy(self.base_cfg)
         self._populate_controls_from_cfg()
         self._set_tuning_state(True)
-        self._set_results("Config loaded. Adjust sliders if needed, then click Run sizing.")
+        self._set_results(f"Loaded: {path.name}\n\nAdjust sliders if needed, then click Run sizing.")
 
     def _populate_controls_from_cfg(self) -> None:
         assert self.base_cfg is not None
         cfg = self.base_cfg
         for ui_id, keys in UI_CONTROL_TO_CFG_KEYS.items():
-            val = _require_param(cfg, *keys)
+            val = require_param(cfg, *keys)
             if ui_id == "n_packs":
                 self.controls[ui_id].set(int(val))
+                if ui_id in self._scales:
+                    self._scales[ui_id].set(int(val))
             else:
-                self.controls[ui_id].set(float(val))
+                fv = float(val)
+                self.controls[ui_id].set(fv)
+                if ui_id in self._scales:
+                    self._scales[ui_id].set(fv)
             self._refresh_owner_caption(ui_id)
         t_box = float(self.controls["box_target_temperature_k"].get())
         t_rad = float(self.controls["radiator_temperature_k"].get())
         if t_rad > t_box:
             self.controls["radiator_temperature_k"].set(t_box)
-
-    def _working_cfg(self) -> dict:
-        if self.base_cfg is None or self.cfg is None:
-            raise RuntimeError("Config not loaded")
-        cfg = copy.deepcopy(self.base_cfg)
-        apply_ui_values(self.base_cfg, cfg, self.controls)
-        return cfg
 
     def run_sizing(self) -> None:
         blocked, messages = app_gate_blocked(self.base_cfg or {})
@@ -380,15 +336,10 @@ class SizerGUI:
             self._set_results("Blocked:\n" + "\n".join(f"  • {m}" for m in messages))
             return
         try:
-            cfg = self._working_cfg()
-            validate_for_run(cfg)
-            results = run_all_cases(cfg)
-            coupling = rtg_module_enabled(cfg) and param_value(cfg, "rtg", "coupling_fraction") is not None
-            se_high = float(self.controls["specific_energy_wh_per_kg_high"].get())
-            sens = run_n_packs_sensitivity(cfg, specific_energy=se_high, n_list=(1, 2, 4, 8, 16))
+            cfg, text, results, sens = run_sizing_report(self.base_cfg or {}, self.controls)
+            self.last_working_cfg = cfg
             self.last_results = results
             self.last_sens = sens
-            text = format_results_table(results, coupling, cfg) + format_n_packs_table(sens, cfg)
             self._set_results(text)
             self.pdf_btn.configure(state=tk.NORMAL)
         except Exception as e:
@@ -406,15 +357,18 @@ class SizerGUI:
         if not path:
             return
         try:
-            cfg = self._working_cfg()
-            validate_for_run(cfg)
-            write_report_pdf(Path(path), cfg, self.last_results, [], [], n_pack_rows=self.last_sens)
+            cfg = build_working_cfg(self.base_cfg, self.controls)
+            write_sizing_pdf(Path(path), cfg, self.last_results, self.last_sens)
             messagebox.showinfo("Save PDF", f"Wrote {path}")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
 
 
 def main() -> None:
+    if tk is None:
+        print("Tkinter is not installed.", file=sys.stderr)
+        print("On Linux try: sudo apt install python3-tk", file=sys.stderr)
+        sys.exit(1)
     try:
         root = tk.Tk()
     except tk.TclError as e:
