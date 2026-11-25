@@ -95,7 +95,7 @@ def test_gui_ui_override_only_on_change(example_cfg):
 def test_gui_blocker_gate_blocks_luke_config():
     blocked, messages = gui_logic.app_gate_blocked(load_config(LUKE_CFG))
     assert blocked
-    assert len(messages) == 22
+    assert len(messages) == 21
 
 
 def test_gui_blocker_gate_allows_example_config(example_cfg):

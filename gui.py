@@ -28,6 +28,10 @@ try:
 except ImportError:  # pragma: no cover - headless CI may lack tkinter
     tk = None  # type: ignore[misc, assignment]
 
+# Left tuning column: label (28 chars) + Scale trough + owner caption — must fit inside paned min width.
+TUNING_PANEL_MIN_WIDTH = 560
+SCALE_LENGTH = 190
+
 
 def _horizontal_scale(
     parent: tk.Misc,
@@ -36,7 +40,7 @@ def _horizontal_scale(
     from_: float,
     to: float,
     resolution: float,
-    length: int = 220,
+    length: int = SCALE_LENGTH,
 ) -> tk.Scale:
     digits = 0 if isinstance(var, tk.IntVar) else 3
     return tk.Scale(
@@ -59,7 +63,6 @@ class SizerGUI:
     def __init__(self, root: tk.Tk, *, config_path: Optional[Path] = None) -> None:
         self.root = root
         self.root.title("Moon Base Battery Sizer")
-        self.root.minsize(960, 640)
         self.base_cfg: Optional[dict] = None
         self.loaded_path: Optional[Path] = None
         self.last_results = None
@@ -84,17 +87,28 @@ class SizerGUI:
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
 
         left_outer = ttk.Frame(paned)
-        paned.add(left_outer, weight=1)
+        self._tuning_pane = left_outer
+        paned.add(left_outer, weight=0)
         canvas = tk.Canvas(left_outer, highlightthickness=0)
         scroll = ttk.Scrollbar(left_outer, orient=tk.VERTICAL, command=canvas.yview)
         self.tuning_frame = ttk.Frame(canvas, padding=4)
-        self.tuning_frame.bind(
-            "<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all"))
+        self._tuning_canvas = canvas
+
+        def _on_tuning_frame_configure(_event: tk.Event) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_tuning_canvas_configure(event: tk.Event) -> None:
+            canvas.itemconfigure(self._tuning_canvas_window, width=max(event.width, 1))
+
+        self.tuning_frame.bind("<Configure>", _on_tuning_frame_configure)
+        self._tuning_canvas_window = canvas.create_window(
+            (0, 0), window=self.tuning_frame, anchor="nw", width=TUNING_PANEL_MIN_WIDTH
         )
-        canvas.create_window((0, 0), window=self.tuning_frame, anchor="nw")
+        canvas.bind("<Configure>", _on_tuning_canvas_configure)
         canvas.configure(yscrollcommand=scroll.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._paned = paned
 
         right = ttk.Frame(paned, padding=4)
         paned.add(right, weight=2)
@@ -123,6 +137,26 @@ class SizerGUI:
 
         self._build_tuning_controls()
         self.load_config()
+        self.root.after_idle(self._fit_window_to_content)
+
+    def _fit_window_to_content(self) -> None:
+        self.root.update_idletasks()
+        try:
+            self._paned.sashpos(0, TUNING_PANEL_MIN_WIDTH)
+        except tk.TclError:
+            pass
+        req_w = self.root.winfo_reqwidth()
+        req_h = self.root.winfo_reqheight()
+        margin_w, margin_h = 12, 12
+        w = max(req_w + margin_w, TUNING_PANEL_MIN_WIDTH + 440)
+        scroll_h = 0
+        bbox = self._tuning_canvas.bbox("all")
+        if bbox:
+            scroll_h = int(bbox[3] - bbox[1]) + self._tuning_canvas.winfo_rooty() - self.root.winfo_rooty() + 48
+        h = max(req_h + margin_h, scroll_h, 560)
+        self.root.minsize(w, h)
+        self.root.geometry(f"{w}x{h}")
+        self.root.update_idletasks()
 
     def _pick_example_config(self) -> None:
         self.path_var.set(str(EXAMPLE_CFG))
@@ -144,8 +178,11 @@ class SizerGUI:
             widget.pack(side=tk.LEFT, fill=tk.NONE, expand=False)
         else:
             widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        own = ttk.Label(row, text="", font=("TkDefaultFont", 8), foreground="gray")
-        own.pack(side=tk.LEFT, padx=6)
+        own = ttk.Label(row, text="", font=("TkDefaultFont", 8), foreground="gray", wraplength=220)
+        if isinstance(widget, tk.Scale):
+            own.pack(side=tk.LEFT, padx=(2, 0), fill=tk.NONE, expand=False, anchor=tk.N)
+        else:
+            own.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
         self._owner_labels[ui_id] = own
         self.controls[ui_id] = var
         if isinstance(widget, tk.Scale):
@@ -320,6 +357,7 @@ class SizerGUI:
         self._set_tuning_state(True)
         self._set_results(f"Loaded: {path.name}\n\nAdjust sliders if needed, then click Run sizing.")
         self.root.after_idle(self._sync_all_scales)
+        self.root.after_idle(self._fit_window_to_content)
 
     def _populate_controls_from_cfg(self) -> None:
         assert self.base_cfg is not None

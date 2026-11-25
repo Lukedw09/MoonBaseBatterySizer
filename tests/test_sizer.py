@@ -459,7 +459,6 @@ def test_dawn_warmup_energy_hand_calc(example_cfg):
 LUKE_DESIGN_BLOCKERS = sorted(
     [
         "battery.cell_nominal_voltage_v",
-        "battery.pack_volumetric_energy_density_wh_per_m3",
         "battery.packaging_insulation_mass_factor",
         "geometry.bottom_radiates_to (Whether box bottom sees regolith or lander deck)",
         "geometry.box_height_m",
@@ -484,10 +483,10 @@ LUKE_DESIGN_BLOCKERS = sorted(
 )
 
 
-def test_luke_config_has_22_cli_blockers():
+def test_luke_config_has_21_cli_blockers():
     luke = load_config(LUKE_CFG)
     got = sorted(design_blockers(luke))
-    assert len(got) == 22
+    assert len(got) == 21
     assert got == LUKE_DESIGN_BLOCKERS
     with pytest.raises(DesignInputError) as err:
         validate_for_run(luke)

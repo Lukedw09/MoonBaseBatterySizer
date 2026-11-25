@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -25,20 +24,34 @@ def test_gui_module_imports_with_tkinter():
     assert gui.UI_CONTROL_TO_CFG_KEYS is not None
 
 
+def _assert_scale_inside_row(scale) -> None:
+    from gui import SCALE_LENGTH
+
+    row = scale.master
+    scale.update_idletasks()
+    row.update_idletasks()
+    sx, _ = scale.winfo_x(), scale.winfo_y()
+    sw, sh = scale.winfo_width(), scale.winfo_height()
+    rw = row.winfo_width()
+    assert sw >= min(SCALE_LENGTH - 4, 160), f"scale too narrow: {sw}"
+    assert sh >= 18
+    assert sx >= 0
+    assert sx + sw <= rw + 2, f"scale right {sx + sw} exceeds row width {rw}"
+
+
 def test_fraction_scales_display_after_example_load():
     import tkinter as tk
 
-    from gui import SizerGUI
+    from gui import TUNING_PANEL_MIN_WIDTH, SizerGUI
     from gui_logic import EXAMPLE_CFG
 
     root = tk.Tk()
     root.withdraw()
     app = SizerGUI(root, config_path=EXAMPLE_CFG)
     root.update_idletasks()
-    root.geometry("1150x760")
     root.deiconify()
-    root.update()
     app._sync_all_scales()
+    app._fit_window_to_content()
     root.update()
 
     dod = app._scales["depth_of_discharge"]
@@ -61,11 +74,40 @@ def test_fraction_scales_display_after_example_load():
         root.update()
         assert scale.winfo_ismapped()
         assert scale.winfo_viewable()
-        bx = scale.winfo_x()
-        by = scale.winfo_y()
-        bw = scale.winfo_width()
-        bh = scale.winfo_height()
-        assert bw >= 180 and bh >= 18
-        assert bx >= 0 and by >= 0
+        _assert_scale_inside_row(scale)
+
+    assert app._tuning_pane.winfo_width() >= TUNING_PANEL_MIN_WIDTH - 8
+
+    root.destroy()
+
+
+def test_all_scales_fit_row_at_max_value():
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG)
+    app._fit_window_to_content()
+    root.update()
+
+    for ui_id, scale in app._scales.items():
+        end = float(scale.cget("to"))
+        scale.set(end)
+    app._sync_all_scales()
+    root.update_idletasks()
+
+    for scale in app._scales.values():
+        assert scale.cget("state") == tk.NORMAL
+        _assert_scale_inside_row(scale)
+        row = scale.master
+        assert row.winfo_ismapped()
+        canvas = app._tuning_canvas
+        assert canvas.winfo_ismapped()
+        crx = canvas.winfo_rootx()
+        srx = scale.winfo_rootx()
+        sw = scale.winfo_width()
+        assert srx + sw <= crx + canvas.winfo_width() + 2
 
     root.destroy()
