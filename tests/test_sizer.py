@@ -61,7 +61,6 @@ from sizer import (
     validate_for_run,
     write_report_pdf,
     todo_luke_list,
-    build_n_pack_sweep_figure,
     figure_text_extents_px,
     format_n_packs_table,
 )
@@ -577,20 +576,58 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     assert "BELOW LiPo limit" in text
 
 
-def test_report_pdf_sweep_text_fits_page_width(example_cfg):
+def _sweep_figures_from_captured(captured_figs):
+    sweep = []
+    for fig in captured_figs:
+        w_px, extents = figure_text_extents_px(fig)
+        if any("N_PACKS SENSITIVITY" in txt for _, _, txt in extents):
+            sweep.append(fig)
+    return sweep
+
+
+def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
 
+    captured_figs: list = []
+
+    class _CapturingPdfPages:
+        def __init__(self, path, *args, **kwargs):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def savefig(self, fig, *args, **kwargs):
+            captured_figs.append(fig)
+
+    monkeypatch.setattr("matplotlib.backends.backend_pdf.PdfPages", _CapturingPdfPages)
+
+    results = run_all_cases(example_cfg)
     sens = run_n_packs_sensitivity(example_cfg, specific_energy=200, n_list=(1, 2, 4, 8, 16))
-    lines = format_n_packs_table(sens, example_cfg).splitlines()
-    fig = build_n_pack_sweep_figure(lines)
+    write_report_pdf(
+        tmp_path / "layout_probe.pdf",
+        example_cfg,
+        results,
+        [],
+        todo_luke_list(example_cfg),
+        n_pack_rows=sens,
+    )
+    sweep_figs = _sweep_figures_from_captured(captured_figs)
+    assert sweep_figs, "write_report_pdf did not emit an n-packs sweep figure"
     try:
-        w_px, extents = figure_text_extents_px(fig)
-        xmax = 0.95 * w_px
-        for x0, x1, _ in extents:
-            assert x0 >= 0.0, f"text starts off-page left: x0={x0}"
-            assert x1 <= xmax + 0.5, f"text exceeds 95%% page width: x1={x1} limit={xmax}"
+        for fig in sweep_figs:
+            w_px, extents = figure_text_extents_px(fig)
+            xmin = 0.04 * w_px
+            xmax = 0.95 * w_px
+            for x0, x1, _ in extents:
+                assert x0 >= xmin - 0.5, f"text left margin too small: x0={x0} min={xmin}"
+                assert x1 <= xmax + 0.5, f"text exceeds 95%% page width: x1={x1} limit={xmax}"
     finally:
-        plt.close(fig)
+        for fig in captured_figs:
+            plt.close(fig)
 
 
 def test_streamlit_app_gate_smoke():

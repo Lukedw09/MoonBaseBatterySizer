@@ -1977,6 +1977,12 @@ def build_n_pack_sweep_figure(sweep_lines: List[str]):
 
 def figure_text_extents_px(fig) -> Tuple[float, List[Tuple[float, float, str]]]:
     """Return (page_width_px, [(x0, x1, text), ...]) for all Text artists after draw."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    if fig.canvas is None:
+        FigureCanvasAgg(fig)
+    elif not hasattr(fig.canvas, "get_renderer"):
+        FigureCanvasAgg(fig)
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     w_px = fig.get_figwidth() * fig.dpi
@@ -2080,30 +2086,29 @@ def write_report_pdf(
 
         if n_pack_rows:
             sweep_lines = format_n_packs_table(n_pack_rows, cfg).splitlines()
-            sweep_fs = 7.5
             dy = 0.0135
-            fig, ax = plt.subplots(figsize=(8.5, 11))
-            ax.axis("off")
-            ax.set_position([0, 0, 1, 1])
+
+            def _new_sweep_figure():
+                f, a = plt.subplots(figsize=(8.5, 11))
+                a.axis("off")
+                a.set_position([0, 0, 1, 1])
+                return f, a
+
+            fig, ax = _new_sweep_figure()
+            chunk: List[str] = []
             y = 0.98
             for line in sweep_lines:
                 if y < 0.02:
+                    render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98)
                     pdf.savefig(fig)
                     plt.close(fig)
-                    fig, ax = plt.subplots(figsize=(8.5, 11))
-                    ax.axis("off")
-                    ax.set_position([0, 0, 1, 1])
+                    fig, ax = _new_sweep_figure()
+                    chunk = []
                     y = 0.98
-                fig.text(
-                    0.06,
-                    y,
-                    line,
-                    fontsize=sweep_fs,
-                    family="monospace",
-                    va="top",
-                    transform=fig.transFigure,
-                )
+                chunk.append(line)
                 y -= dy
+            if chunk:
+                render_n_pack_sweep_lines_on_figure(fig, chunk, start_y=0.98)
             pdf.savefig(fig)
             plt.close(fig)
 
