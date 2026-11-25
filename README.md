@@ -32,6 +32,13 @@ streamlit run app.py
 
 Default config in the app is **EXAMPLE ONLY** (`examples/example_config.yaml`). Sliders adjust loads, pack count, volumetric density, temperatures, and wake-panel inputs; **Run sizing** refreshes results and the **n_packs** sweep. Download the PDF from the button.
 
+## Operating cases (owner: luke)
+
+1. **5 kW all-night** — primary sizing, radiators reject excess heat, part-load break-even \(P_{\mathrm{be}}\) marks where louvers must close.
+2. **Cold shutdown (P = 0)** — per-pack thermal coast through the night, then **dawn wake solar** panel per pack (not pack discharge).
+
+There is **no separate low-load survival case**; radiator **louvers or a passive thermal switch must close** for cold shutdown so bare radiator area does not stay open (the model reports **louvers-stuck-open** coast vs closed coast and flags LiPo breach).
+
 ## Layout
 
 - **`layout.model: distributed_packs`** — several pack landers (box + legs + radiator); **no RTG deck** (`rtg.enabled: false`).

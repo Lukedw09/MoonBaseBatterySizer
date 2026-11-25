@@ -54,11 +54,9 @@ NON_BLOCKING_TODO_PATHS = {
     "battery.pack_specific_heat_j_per_kgk",
     "battery.lipo_margin_threshold_k",
     "thermal_environment.lander_deck_temperature_k",
-    "fallback.mode",
     "rtg.thermal_output_w",
     "radiation.penetration_seam_emittance_multiplier",
     "rtg.inward_face_absorptance",
-    "fallback.pack_volumetric_energy_density_wh_per_m3",
     "geometry.n_battery_boxes",
     "geometry.ring_radius_m",
     "rtg.coupling_fraction",
@@ -1238,7 +1236,8 @@ class CaseResult:
     wake_p_per_pack_w: Optional[float] = None
     system_mass_kg: Optional[float] = None
     break_even_load_w: Optional[float] = None
-    louvers_stuck_open_delta_t_k: Optional[float] = None
+    coast_stuck_open_t_final_k: Optional[float] = None
+    coast_stuck_open_margin_lipo_k: Optional[float] = None
     louvers_stuck_below_lipo: Optional[bool] = None
     cold_margin_alert: Optional[bool] = None
 
@@ -1308,74 +1307,7 @@ def thermal_q_per_pack_stuck_open_radiator(
     return th.q_per_pack_w + q_rad_open
 
 
-def build_q_loss_closed_louver_lut(
-    cfg: Dict[str, Any],
-    fleet_capacity_wh: float,
-    radiator_deployed_m2_per_pack: float,
-    n_points: int = 60,
-) -> Tuple[List[float], List[float]]:
-    import numpy as np
-
-    temps = [float(x) for x in np.linspace(40.0, 290.0, max(5, n_points))]
-    q_vals = []
-    for t in temps:
-        th = compute_thermal_loss(
-            cfg,
-            t_box_k=t,
-            fleet_capacity_wh=fleet_capacity_wh,
-            radiator_operating=False,
-            radiator_deployed_area_m2_per_pack=radiator_deployed_m2_per_pack,
-            q_radiator_reject_per_pack_w=0.0,
-        )
-        q_vals.append(th.q_per_pack_w)
-    return temps, q_vals
-
-
-def integrate_louvers_closed_survival(
-    cfg: Dict[str, Any],
-    mass_per_pack_kg: float,
-    cp_j_kgk: float,
-    t_start_k: float,
-    duration_h: float,
-    p_load_fleet_w: float,
-    eta: float,
-    eta_definition: str,
-    fleet_capacity_wh: float,
-    radiator_deployed_m2_per_pack: float,
-    *,
-    dt_s: float = 120.0,
-    lipo_limit_k: Optional[float] = None,
-) -> Dict[str, Any]:
-    """Night at survival load, louvers closed: T-dependent box, legs, and closed-radiator leak."""
-    n_packs = max(1, int(param_value(cfg, "geometry", "n_packs") or 1))
-    q_int_fleet, _ = pick_internal_heat(internal_waste_heat_w(p_load_fleet_w, eta), eta_definition)
-    mc = mass_per_pack_kg * cp_j_kgk
-    q_lut = build_q_loss_closed_louver_lut(cfg, fleet_capacity_wh, radiator_deployed_m2_per_pack)
-    t = 0.0
-    t_end_s = duration_h * 3600.0
-    temp = t_start_k
-    energy_out_j = 0.0
-    time_to_lipo_h: Optional[float] = None
-    while t < t_end_s - 1e-9:
-        step = min(dt_s, t_end_s - t)
-        q_loss_pp = q_loss_from_lut(temp, q_lut[0], q_lut[1])
-        q_int_pp = q_int_fleet / n_packs
-        q_net_out_pp = q_loss_pp - q_int_pp
-        energy_out_j += q_net_out_pp * n_packs * step
-        temp -= q_net_out_pp * step / mc
-        t += step
-        if lipo_limit_k is not None and time_to_lipo_h is None and temp <= lipo_limit_k:
-            time_to_lipo_h = t / 3600.0
-    return {
-        "t_final_k": temp,
-        "delta_t_k": temp - t_start_k,
-        "time_to_lipo_h": time_to_lipo_h,
-        "margin_lipo_k": (temp - lipo_limit_k) if lipo_limit_k is not None else None,
-        "energy_net_out_kwh": max(0.0, energy_out_j / 3.6e6),
-    }
-
-
-def integrate_louvers_stuck_open_survival(
+def integrate_louvers_stuck_open_coast(
     cfg: Dict[str, Any],
     mass_per_pack_kg: float,
     cp_j_kgk: float,
@@ -1391,7 +1323,7 @@ def integrate_louvers_stuck_open_survival(
     dt_s: float = 120.0,
     lipo_limit_k: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Night coast at survival load with open louvers on bare radiator area; T-dependent Q_loss."""
+    """Per-pack coast with louvers stuck open (bare radiator area); T-dependent box, legs, radiative loss."""
     n_packs = max(1, int(param_value(cfg, "geometry", "n_packs") or 1))
     q_int_fleet, _ = pick_internal_heat(internal_waste_heat_w(p_load_fleet_w, eta), eta_definition)
     mc = mass_per_pack_kg * cp_j_kgk
@@ -1422,40 +1354,14 @@ def integrate_louvers_stuck_open_survival(
     }
 
 
-def scaled_geometry_for_separate_pack(
-    cfg: Dict[str, Any], pack_mass_kg: float, specific_energy_wh_kg: float
-) -> Optional[Dict[str, float]]:
-    rho = param_value(cfg, "battery", "pack_volumetric_energy_density_wh_per_m3") or param_value(
-        cfg, "fallback", "pack_volumetric_energy_density_wh_per_m3"
-    )
-    if rho is None or rho <= 0:
-        return None
-    capacity_wh = pack_mass_kg * specific_energy_wh_kg
-    volume_m3 = capacity_wh / rho
-    n = param_value(cfg, "geometry", "n_packs") or param_value(cfg, "geometry", "n_battery_boxes")
-    if not n:
-        return None
-    h = param_value(cfg, "geometry", "box_height_m")
-    l = param_value(cfg, "geometry", "box_length_m")
-    w = param_value(cfg, "geometry", "box_width_m")
-    if not all([h, l, w]):
-        return None
-    vol_per_box = volume_m3 / n
-    scale = (vol_per_box / (l * w * h)) ** (1.0 / 3.0)
-    return {"scale": scale, "volume_m3": volume_m3}
-
-
 def solve_case(
     load_name: str,
     load_w: float,
     specific_energy: float,
     cfg: Dict[str, Any],
-    fallback_branch: str = "primary",
+    case_branch: str = "primary",
     emittance: Optional[float] = None,
     k_leg: Optional[float] = None,
-    primary_pack: Optional[BatterySizing] = None,
-    transient_mass_kg: Optional[float] = None,
-    primary_case: Optional[CaseResult] = None,
     max_iter: int = 40,
     tol_w: float = 1e-2,
 ) -> CaseResult:
@@ -1487,60 +1393,31 @@ def solve_case(
     p_heater = 0.0
     iterations = 0
     thermal_cfg = cfg
-    geometry_scales = fallback_branch == "separate_pack"
-    iterate = geometry_scales or mode == "fixed_rtg"
+    iterate = mode == "fixed_rtg"
 
     for loop_i in range(max_iter if iterate else 1):
         iterations = loop_i + 1
         battery = size_battery_pack(
             load_w, p_heater, t_dark, dod, eta_dis, specific_energy, packaging, bus_v, cell_v, cell_ah
         )
-        if fallback_branch == "same_pack_survival":
-            if primary_pack is None:
-                raise ConfigError("same_pack_survival requires primary_pack (reuse primary mass/geometry)")
-            battery.mass_kg = primary_pack.mass_kg
-            battery.capacity_wh = primary_pack.capacity_wh
-        if geometry_scales:
-            scale_info = scaled_geometry_for_separate_pack(cfg, battery.mass_kg, specific_energy)
-            if scale_info:
-                import copy
-
-                thermal_cfg = copy.deepcopy(cfg)
-                s = scale_info["scale"]
-                for key in ("box_length_m", "box_width_m", "box_height_m"):
-                    thermal_cfg["geometry"][key]["value"] = param_value(cfg, "geometry", key) * s
-
         cap_wh = battery.capacity_wh
-        survival_closed = fallback_branch == "same_pack_survival" and primary_case is not None
-        if survival_closed:
-            area_pp = primary_case.thermal.radiator_area_per_pack_m2
-            thermal = compute_thermal_loss(
-                thermal_cfg,
-                emittance=emittance,
-                k_leg=k_leg,
-                fleet_capacity_wh=cap_wh,
-                radiator_operating=False,
-                radiator_deployed_area_m2_per_pack=area_pp,
-                q_radiator_reject_per_pack_w=0.0,
-            )
-        else:
-            thermal = compute_thermal_loss(
-                thermal_cfg,
-                emittance=emittance,
-                k_leg=k_leg,
-                fleet_capacity_wh=cap_wh,
-                radiator_operating=True,
-            )
-            excess_pre = max(0.0, q_internal - thermal.q_total_w)
-            n_p = max(1, thermal.n_packs)
-            thermal = compute_thermal_loss(
-                thermal_cfg,
-                emittance=emittance,
-                k_leg=k_leg,
-                q_radiator_reject_per_pack_w=excess_pre / n_p,
-                fleet_capacity_wh=cap_wh,
-                radiator_operating=True,
-            )
+        thermal = compute_thermal_loss(
+            thermal_cfg,
+            emittance=emittance,
+            k_leg=k_leg,
+            fleet_capacity_wh=cap_wh,
+            radiator_operating=True,
+        )
+        excess_pre = max(0.0, q_internal - thermal.q_total_w)
+        n_p = max(1, thermal.n_packs)
+        thermal = compute_thermal_loss(
+            thermal_cfg,
+            emittance=emittance,
+            k_leg=k_leg,
+            q_radiator_reject_per_pack_w=excess_pre / n_p,
+            fleet_capacity_wh=cap_wh,
+            radiator_operating=True,
+        )
         if mode == "fixed_rtg" and rtg_on:
             if q_rtg_fixed is None:
                 raise ConfigError("mode=fixed_rtg requires rtg.thermal_output_w")
@@ -1583,47 +1460,11 @@ def solve_case(
         leg_mass = float(param_value(cfg, "lander_legs", "leg_structure_mass_kg_per_pack") or 0.0)
     system_mass = battery.mass_kg + thermal.radiator_mass_total_kg + leg_mass * max(1, thermal.n_packs)
 
-    mass_for_transient = transient_mass_kg or (primary_pack.mass_kg if primary_pack else battery.mass_kg)
+    mass_for_transient = battery.mass_kg
     q_net_no_rtg = thermal.q_total_w - q_internal
-    dT_stuck: Optional[float] = None
+    dT = lumped_transient_delta_t_k(q_net_no_rtg, mass_for_transient, cp, t_dark)
     p_be: Optional[float] = None
-    stuck_below_lipo: Optional[bool] = None
-    if primary_case is not None and fallback_branch == "same_pack_survival":
-        n_stuck = max(1, thermal.n_packs)
-        mass_pp = mass_for_transient / n_stuck
-        closed = integrate_louvers_closed_survival(
-            thermal_cfg,
-            mass_pp,
-            cp,
-            t_box,
-            t_dark,
-            load_w,
-            eta,
-            eta_def,
-            cap_wh,
-            primary_case.thermal.radiator_area_per_pack_m2,
-            lipo_limit_k=lipo_lim,
-        )
-        dT = closed["delta_t_k"]
-        stuck = integrate_louvers_stuck_open_survival(
-            thermal_cfg,
-            mass_pp,
-            cp,
-            t_box,
-            t_dark,
-            load_w,
-            eta,
-            eta_def,
-            cap_wh,
-            primary_case.thermal.radiator_area_per_pack_m2,
-            primary_case.thermal.radiator_bare_area_per_pack_m2,
-            lipo_limit_k=lipo_lim,
-        )
-        dT_stuck = stuck["delta_t_k"]
-        stuck_below_lipo = stuck["margin_lipo_k"] is not None and stuck["margin_lipo_k"] < 0
-    else:
-        dT = lumped_transient_delta_t_k(q_net_no_rtg, mass_for_transient, cp, t_dark)
-    if fallback_branch == "primary":
+    if case_branch == "primary":
         th_closed = compute_thermal_loss(
             thermal_cfg,
             emittance=emittance,
@@ -1656,7 +1497,7 @@ def solve_case(
         load_name=load_name,
         load_w=load_w,
         specific_energy_wh_kg=specific_energy,
-        fallback_branch=fallback_branch,
+        fallback_branch=case_branch,
         battery=battery,
         thermal=thermal,
         q_internal_w=q_internal,
@@ -1674,8 +1515,6 @@ def solve_case(
         radiative_coupling_info=rad_couple,
         system_mass_kg=system_mass,
         break_even_load_w=p_be,
-        louvers_stuck_open_delta_t_k=dT_stuck,
-        louvers_stuck_below_lipo=stuck_below_lipo,
     )
 
 
@@ -1764,6 +1603,21 @@ def solve_cold_shutdown_case(
         cell_ah=battery.cell_ah,
     )
     dT = coast["t_final_k"] - t_box
+    stuck_coast = integrate_louvers_stuck_open_coast(
+        cfg,
+        mass_per_pack,
+        cp,
+        t_box,
+        t_dark,
+        0.0,
+        eta,
+        eta_def,
+        cap_wh,
+        primary.thermal.radiator_area_per_pack_m2,
+        primary.thermal.radiator_bare_area_per_pack_m2,
+        dt_s=dt_s,
+        lipo_limit_k=lipo_lim,
+    )
     margin_thr = lipo_margin_threshold_k(cfg)
     margin_alert = (
         coast["margin_lipo_k"] is not None
@@ -1810,6 +1664,9 @@ def solve_cold_shutdown_case(
         wake_p_per_pack_w=warmup["p_heater_w"],
         system_mass_kg=(primary.system_mass_kg or 0) + panel_m * n_packs,
         cold_margin_alert=margin_alert,
+        coast_stuck_open_t_final_k=stuck_coast["t_final_k"],
+        coast_stuck_open_margin_lipo_k=stuck_coast["margin_lipo_k"],
+        louvers_stuck_below_lipo=stuck_coast["margin_lipo_k"] is not None and stuck_coast["margin_lipo_k"] < 0,
     )
 
 
@@ -1820,51 +1677,6 @@ def todo_luke_list(cfg: Dict[str, Any]) -> List[str]:
             suffix = " (unset)" if row["value"] == "(unset)" else ""
             rows.append(f"{row['path']}: {row['value']} {row['units']} — {row['source']}{suffix}")
     return rows
-
-
-def pack_efficiency_from_case(r: CaseResult) -> float:
-    b = r.battery
-    if b.p_load_w > 0 and r.q_internal_w >= 0:
-        return b.p_load_w / (b.p_load_w + r.q_internal_w)
-    return b.eta_discharge
-
-
-def _internal_waste_key(eta_definition: str) -> str:
-    return "discharge_definition" if eta_definition == "discharge" else "round_trip_definition"
-
-
-def electric_heater_alternative(r: CaseResult) -> Optional[Dict[str, float]]:
-    """Pack-powered resistive heat: P_heat = η × (Q_loss − Q_internal load); includes discharge loss on heater."""
-    gap = r.thermal.q_total_w - r.q_internal_w
-    if gap <= 0:
-        return None
-    eta = pack_efficiency_from_case(r)
-    wkey = _internal_waste_key(r.q_internal_note)
-    p_heater = eta * gap
-    q_int_h = internal_waste_heat_w(p_heater, eta)[wkey]
-    e_heater_wh = p_heater * r.battery.t_dark_h
-    capacity_extra_wh = e_heater_wh / (r.battery.dod * r.battery.eta_discharge)
-    return {
-        "p_shortfall_w": p_heater,
-        "q_internal_from_heater_w": q_int_h,
-        "e_heater_wh": e_heater_wh,
-        "capacity_extra_wh": capacity_extra_wh,
-    }
-
-
-def format_electric_heater_alt_line(r: CaseResult) -> Optional[str]:
-    if r.fallback_branch != "same_pack_survival":
-        return None
-    alt = electric_heater_alternative(r)
-    if alt is None:
-        return None
-    b = r.battery
-    return (
-        f"  Electric-heater alt (vs RTG thermal): P_heat={alt['p_shortfall_w']:.1f} W steady → "
-        f"{alt['e_heater_wh']/1000:.3f} kWh over {b.t_dark_h:.0f} h; "
-        f"+{alt['capacity_extra_wh']/1000:.3f} kWh capacity increment "
-        f"(DoD={b.dod}, η_dis={b.eta_discharge:.3f}; includes heater discharge loss)"
-    )
 
 
 def placeholder_list(cfg: Dict[str, Any]) -> List[str]:
@@ -1939,11 +1751,8 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
             lines.append(f"  Q_RTG         — {r.q_rtg_message}")
         if r.radiative_coupling_info is not None:
             lines.append(f"  Info only: radiative coupling estimate ≈ {r.radiative_coupling_info:.4f}")
-        if r.transient_delta_t_k is not None:
+        if r.transient_delta_t_k is not None and r.fallback_branch == "primary":
             lines.append(f"  Transient ΔT (passive coast, no RTG) ≈ {r.transient_delta_t_k:.2f} K")
-        alt_line = format_electric_heater_alt_line(r)
-        if alt_line:
-            lines.append(alt_line)
         if r.fallback_branch == "cold_shutdown" and r.coast_t_final_k is not None:
             t0 = r.coast_t_final_k - (r.transient_delta_t_k or 0.0)
             lines.append(
@@ -1953,7 +1762,18 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
             if r.coast_time_to_lipo_h is not None:
                 lines.append(f"  Time to LiPo limit: {r.coast_time_to_lipo_h:.2f} h")
             elif r.coast_margin_lipo_k is not None:
-                lines.append(f"  LiPo margin at dawn: {r.coast_margin_lipo_k:.2f} K")
+                lines.append(f"  LiPo margin at dawn (louvers closed): {r.coast_margin_lipo_k:.2f} K")
+            if r.coast_stuck_open_t_final_k is not None:
+                breach = " — BELOW LiPo limit" if r.louvers_stuck_below_lipo else ""
+                marg = r.coast_stuck_open_margin_lipo_k
+                mg = f", LiPo margin {marg:.2f} K" if marg is not None else ""
+                lines.append(
+                    f"  Louvers-stuck-open cold coast: {t0:.2f} K → {r.coast_stuck_open_t_final_k:.2f} K "
+                    f"(closed louvers → {r.coast_t_final_k:.2f} K){mg}{breach}"
+                )
+                lines.append(
+                    "  Radiator must passively close (louvers or thermal switch) for cold shutdown — see README."
+                )
             if r.dawn_warmup_p_heater_w is not None and r.dawn_warmup_target_k is not None:
                 lines.append(
                     f"  Dawn warm-up → {r.dawn_warmup_target_k:.1f} K: "
@@ -1965,15 +1785,6 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
             lines.append(
                 f"  Part-load break-even (louvers closed): P_be ≈ {r.break_even_load_w/1000:.3f} kW fleet "
                 f"— below this, packs cool even with louvers shut"
-            )
-        if r.fallback_branch == "same_pack_survival" and r.louvers_stuck_open_delta_t_k is not None:
-            t_hold = param_value(cfg, "battery", "box_target_temperature_k") if cfg else 273.15
-            t_fin = t_hold + (r.transient_delta_t_k or 0)
-            t_stuck = t_hold + r.louvers_stuck_open_delta_t_k
-            breach = " — BELOW LiPo limit" if r.louvers_stuck_below_lipo else ""
-            lines.append(
-                f"  Louvers-stuck-open transient (integrated, bare A_rad): ΔT ≈ {r.louvers_stuck_open_delta_t_k:.1f} K "
-                f"(hold {t_hold:.1f} K → {t_stuck:.1f} K vs closed louvers → {t_fin:.1f} K){breach}"
             )
         if r.fallback_branch == "cold_shutdown" and r.coast_margin_lipo_k is not None:
             thr = lipo_margin_threshold_k(cfg) if cfg else None
@@ -2000,45 +1811,11 @@ def run_all_cases(cfg: Dict[str, Any]) -> List[CaseResult]:
     se_low = param_value(cfg, "battery", "specific_energy_wh_per_kg_low")
     se_high = param_value(cfg, "battery", "specific_energy_wh_per_kg_high")
     primary_w = param_value(cfg, "loads", "primary_w")
-    loads = [
-        ("primary_5000W", primary_w),
-        ("survival_100W", param_value(cfg, "loads", "survival_high_w")),
-        ("survival_50W", param_value(cfg, "loads", "survival_low_w")),
-    ]
-    fb = param_value(cfg, "fallback", "mode")
-    survival_branches = ["same_pack_survival", "separate_pack"] if fb is None else [fb]
-
-    primary_by_se: Dict[float, CaseResult] = {}
-    for se in (se_low, se_high):
-        primary_by_se[se] = solve_case("primary_5000W", primary_w, se, cfg, fallback_branch="primary")
-
     results: List[CaseResult] = []
-    for name, pw in loads:
-        is_primary = "primary" in name
-        branch_list = ["primary"] if is_primary else survival_branches
-        for se in (se_low, se_high):
-            for br in branch_list:
-                if is_primary:
-                    results.append(primary_by_se[se])
-                    continue
-                prim = primary_by_se[se].battery
-                results.append(
-                    solve_case(
-                        name,
-                        pw,
-                        se,
-                        cfg,
-                        fallback_branch=br,
-                        primary_pack=prim if br == "same_pack_survival" else None,
-                        primary_case=primary_by_se[se] if br == "same_pack_survival" else None,
-                        transient_mass_kg=prim.mass_kg if br == "same_pack_survival" else None,
-                    )
-                )
-
     for se in (se_low, se_high):
-        if se in primary_by_se:
-            cs = solve_cold_shutdown_case(cfg, primary_by_se[se])
-            results.append(cs)
+        prim = solve_case("primary_5000W", primary_w, se, cfg, case_branch="primary")
+        results.append(prim)
+        results.append(solve_cold_shutdown_case(cfg, prim))
     return results
 
 
@@ -2053,7 +1830,7 @@ def run_n_packs_sensitivity(
     for n in n_list:
         c = copy.deepcopy(cfg)
         c["geometry"]["n_packs"]["value"] = n
-        r = solve_case("primary_5000W", primary_w, specific_energy, c, fallback_branch="primary")
+        r = solve_case("primary_5000W", primary_w, specific_energy, c, case_branch="primary")
         cs = solve_cold_shutdown_case(c, r)
         th_closed = compute_thermal_loss(
             c,
@@ -2084,7 +1861,9 @@ def run_n_packs_sensitivity(
                 "panel_fleet_m2": cs.wake_panel_area_fleet_m2,
                 "warm_fleet_kwh": cs.dawn_warmup_energy_wh / 1000 if cs.dawn_warmup_energy_wh else None,
                 "cold_tf_k": cs.coast_t_final_k,
+                "cold_tf_stuck_k": cs.coast_stuck_open_t_final_k,
                 "cold_margin_k": margin_k,
+                "cold_stuck_margin_k": cs.coast_stuck_open_margin_lipo_k,
                 "margin_alert": margin_k is not None and thr is not None and margin_k < thr,
                 "p_be_w": p_be,
             }
@@ -2103,7 +1882,7 @@ def format_n_packs_table(rows: List[Dict[str, Any]], cfg: Optional[Dict[str, Any
     alert_hdr = "!" if thr is not None else "-"
     lines.append(
         f"{'n':>3} {'sys/kg':>7} {'Qloss_f':>8} {'Qexc_f':>8} {'Qleak_f':>7} {'Pbe/kW':>7} "
-        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf':>6} {'dLiPo':>6} {'Warm_f':>7} {alert_hdr:>1}"
+        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf_c':>6} {'Tf_so':>6} {'dLiPo':>6} {'Warm_f':>7} {alert_hdr:>1}"
     )
     if thr is None and cfg is not None:
         lines.append("(fleet W/kWh unless _pp = per pack; LiPo margin threshold unset)")
@@ -2111,6 +1890,7 @@ def format_n_packs_table(rows: List[Dict[str, Any]], cfg: Optional[Dict[str, Any
         lines.append("(fleet W/kWh unless _pp = per pack; ! = margin below threshold when set)")
     for row in rows:
         tf = f"{row['cold_tf_k']:.1f}" if row["cold_tf_k"] is not None else "—"
+        tf_so = f"{row['cold_tf_stuck_k']:.1f}" if row.get("cold_tf_stuck_k") is not None else "—"
         dm = f"{row['cold_margin_k']:.1f}" if row.get("cold_margin_k") is not None else "—"
         wk = f"{row['warm_fleet_kwh']:.2f}" if row.get("warm_fleet_kwh") is not None else "—"
         flag = "!" if row.get("margin_alert") else ""
@@ -2119,16 +1899,13 @@ def format_n_packs_table(rows: List[Dict[str, Any]], cfg: Optional[Dict[str, Any
             f"{row['q_loss_fleet_w']:8.1f} {row['q_excess_fleet_w']:8.1f} "
             f"{row['q_leak_fleet_w']:7.1f} {row['p_be_w']/1000:7.2f} "
             f"{row['rad_area_pp_m2']:8.3f} {row['rad_mass_pp_kg']:8.2f} "
-            f"{row['panel_pp_m2']:8.2f} {tf:>6} {dm:>6} {wk:>7} {flag:>1}"
+            f"{row['panel_pp_m2']:8.2f} {tf:>6} {tf_so:>6} {dm:>6} {wk:>7} {flag:>1}"
         )
     return "\n".join(lines)
 
 
 def run_sensitivity(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    loads = [
-        ("primary", param_value(cfg, "loads", "primary_w")),
-        ("survival_high", param_value(cfg, "loads", "survival_high_w")),
-    ]
+    loads = [("primary", param_value(cfg, "loads", "primary_w"))]
     se_low = param_value(cfg, "battery", "specific_energy_wh_per_kg_low")
     em_list = cfg.get("radiation", {}).get("emittance_sensitivity", [])
     rows: List[Dict[str, Any]] = []
@@ -2198,15 +1975,13 @@ def write_report_pdf(
             if r.transient_delta_t_k is not None:
                 block += f" dT={r.transient_delta_t_k:.1f}K"
             if r.fallback_branch == "cold_shutdown" and r.coast_t_final_k is not None:
-                block += f" Tf={r.coast_t_final_k:.1f}K"
+                block += f" Tf_closed={r.coast_t_final_k:.1f}K"
+                if r.coast_stuck_open_t_final_k is not None:
+                    block += f" Tf_stuck={r.coast_stuck_open_t_final_k:.1f}K"
             if r.dawn_warmup_energy_wh:
                 block += f" warm={r.dawn_warmup_energy_wh/1000:.1f}kWh"
             ax.text(0.05, y, block, fontsize=7, family="monospace", va="top")
             y -= 0.055
-            alt_line = format_electric_heater_alt_line(r)
-            if alt_line:
-                ax.text(0.05, y, alt_line.strip()[:120], fontsize=6, family="monospace", va="top")
-                y -= 0.045
             y -= 0.02
         pdf.savefig(fig)
         plt.close(fig)

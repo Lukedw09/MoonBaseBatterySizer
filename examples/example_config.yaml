@@ -18,17 +18,6 @@ loads:
     units: W
     source: "Luke — primary night electrical load"
     owner: luke
-  survival_low_w:
-    value: 50
-    units: W
-    source: "Luke — survival load lower bound"
-    owner: luke
-  survival_high_w:
-    value: 100
-    units: W
-    source: "Luke — survival load upper bound"
-    owner: luke
-
 night:
   t_dark_h:
     value: 72
@@ -339,18 +328,6 @@ rtg:
     units: W
     source: "fixed_rtg only"
     owner: TODO-luke
-
-fallback:
-  mode:
-    value: same_pack_survival
-    units: string
-    source: "Luke — survival load on the same primary pack/box geometry (not separate_pack)"
-    owner: luke
-  pack_volumetric_energy_density_wh_per_m3:
-    value: 250000
-    units: Wh/m^3
-    source: "EXAMPLE for separate_pack branch only"
-    owner: placeholder
 
 physics:
   stefan_boltzmann_w_per_m2k4: 5.670374419e-8

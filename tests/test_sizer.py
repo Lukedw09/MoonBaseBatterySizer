@@ -28,7 +28,6 @@ from sizer import (
     radiator_night_leak_w,
     effective_sink_temperature_k,
     solve_dawn_warmup_solar_w,
-    electric_heater_alternative,
     design_blockers,
     thermal_q_loss_at_box_t,
     break_even_load_w,
@@ -125,7 +124,6 @@ def test_luke_config_still_blocks_until_geometry_set():
     cfg = load_config(LUKE_CFG)
     missing = blocking_missing(cfg)
     assert "battery.eta_definition" not in missing
-    assert "fallback.mode" not in missing
     with pytest.raises(DesignInputError):
         validate_for_run(cfg)
 
@@ -309,7 +307,7 @@ def test_radiator_area_hand_calc():
 
 
 def test_example_primary_thermal_targets(example_cfg):
-    r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    r = solve_case("primary_5000W", 5000, 200, example_cfg, case_branch="primary")
     assert r.q_internal_w == pytest.approx(555.56, rel=0.001)
     assert r.thermal.q_leg_w > 0
     th = r.thermal
@@ -319,28 +317,13 @@ def test_example_primary_thermal_targets(example_cfg):
 
 
 def test_example_known_primary_thermal_numbers(example_cfg):
-    r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    r = solve_case("primary_5000W", 5000, 200, example_cfg, case_branch="primary")
     assert r.thermal.q_leg_w == pytest.approx(162.89855761554043, rel=0.001)
     assert r.thermal.q_total_w == pytest.approx(285.8000123965092, rel=0.001)
     assert r.q_internal_w == pytest.approx(555.5555555555555, rel=0.001)
     assert r.q_excess_w == pytest.approx(269.75554315904657, rel=0.001)
     assert r.thermal.radiator_area_per_pack_m2 == pytest.approx(0.15097993490510722, rel=0.001)
     assert r.battery.capacity_wh == pytest.approx(500_000.0, rel=0.001)
-
-
-def test_example_same_pack_survival_transient_dt(example_cfg):
-    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    surv = solve_case(
-        "survival_100W", 100, 200, example_cfg,
-        fallback_branch="same_pack_survival",
-        primary_pack=prim.battery,
-        primary_case=prim,
-        transient_mass_kg=prim.battery.mass_kg,
-    )
-    mass_pp = prim.battery.mass_kg / max(1, prim.thermal.n_packs)
-    assert mass_pp == pytest.approx(312.5, rel=1e-6)
-    assert surv.transient_delta_t_k == pytest.approx(-26.6, abs=0.15)
-    assert 273.15 + surv.transient_delta_t_k == pytest.approx(246.6, abs=0.15)
 
 
 def test_lander_deck_missing_temperature_raises_ring_layout(example_cfg):
@@ -354,38 +337,14 @@ def test_lander_deck_missing_temperature_raises_ring_layout(example_cfg):
         compute_thermal_loss(bad, fleet_capacity_wh=500_000.0)
 
 
-def test_primary_more_internal_than_survival(example_cfg):
-    rp = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    rs = solve_case("survival_100W", 100, 200, example_cfg, fallback_branch="primary")
-    assert rp.q_internal_w > rs.q_internal_w
-
-
-def test_same_pack_reuses_primary_mass(example_cfg):
-    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    surv = solve_case(
-        "survival_100W", 100, 200, example_cfg,
-        fallback_branch="same_pack_survival", primary_pack=prim.battery, transient_mass_kg=prim.battery.mass_kg,
-    )
-    assert surv.battery.mass_kg == pytest.approx(prim.battery.mass_kg)
-    assert surv.battery.capacity_wh == pytest.approx(prim.battery.capacity_wh)
-
-
-def test_same_pack_without_primary_raises(example_cfg):
-    with pytest.raises(ConfigError, match="primary_pack"):
-        solve_case("survival_100W", 100, 200, example_cfg, fallback_branch="same_pack_survival")
-
-
 def test_fixed_rtg_heater_iteration(example_cfg):
     cfg = copy.deepcopy(example_cfg)
     cfg["meta"]["mode"] = "fixed_rtg"
     cfg["rtg"]["enabled"] = {"value": True, "owner": "placeholder"}
     cfg["rtg"]["coupling_fraction"]["value"] = 0.034
     cfg["rtg"]["thermal_output_w"]["value"] = 10.0
-    prim = solve_case("primary_5000W", 5000, 200, cfg, fallback_branch="primary")
-    r = solve_case(
-        "survival_100W", 100, 200, cfg,
-        fallback_branch="same_pack_survival", primary_pack=prim.battery, transient_mass_kg=prim.battery.mass_kg,
-    )
+    prim = solve_case("primary_5000W", 5000, 200, cfg, case_branch="primary")
+    r = solve_case("low_load_100W", 100, 200, cfg, case_branch="primary")
     coupling = param_value(cfg, "rtg", "coupling_fraction")
     q_int, _ = pick_internal_heat(internal_waste_heat_w(100, param_value(cfg, "battery", "efficiency")), "discharge")
     q_rtg_del = coupling * 10.0
@@ -405,20 +364,20 @@ def test_fixed_rtg_requires_thermal_output(example_cfg):
 def test_n_packs_sensitivity_row_eight(example_cfg):
     rows = run_n_packs_sensitivity(example_cfg, specific_energy=200, n_list=(8,))
     assert rows[0]["q_loss_fleet_w"] == pytest.approx(285.8000123965092, rel=0.001)
-    assert rows[0]["cold_tf_k"] == pytest.approx(245.57228955666554, rel=0.001)
+    assert rows[0]["cold_tf_k"] == pytest.approx(245.57321183820113, rel=0.001)
+    assert rows[0]["cold_tf_stuck_k"] == pytest.approx(230.70323875995143, rel=0.001)
     assert rows[0]["p_be_w"] == pytest.approx(2846.6470554782204, rel=0.001)
 
 
-def test_fallback_both_branches_when_unset(example_cfg):
-    cfg = copy.deepcopy(example_cfg)
-    cfg["fallback"]["mode"]["value"] = None
-    results = run_all_cases(cfg)
-    branches = {r.fallback_branch for r in results if "survival" in r.load_name}
-    assert branches == {"same_pack_survival", "separate_pack"}
+def test_run_all_cases_primary_and_cold_only(example_cfg):
+    results = run_all_cases(example_cfg)
+    assert len(results) == 4
+    names = {r.load_name for r in results}
+    assert names == {"primary_5000W", "cold_shutdown_0W"}
 
 
 def test_solve_case_end_to_end(example_cfg):
-    r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    r = solve_case("primary_5000W", 5000, 200, example_cfg, case_branch="primary")
     coupling = param_value(example_cfg, "rtg", "coupling_fraction")
     assert r.battery.mass_kg > 1000
     assert r.thermal.q_total_w > 100
@@ -446,11 +405,11 @@ def test_battery_efficiency_missing_raises():
     cfg = load_config(EXAMPLE)
     del cfg["battery"]["efficiency"]
     with pytest.raises(ConfigError, match="efficiency"):
-        solve_case("primary_5000W", 5000, 200, cfg, fallback_branch="primary")
+        solve_case("primary_5000W", 5000, 200, cfg, case_branch="primary")
 
 
 def test_cold_shutdown_final_t_on_example(example_cfg):
-    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    prim = solve_case("primary_5000W", 5000, 200, example_cfg, case_branch="primary")
     n_p = max(1, prim.thermal.n_packs)
     mass_pp = prim.battery.mass_kg / n_p
     cp = param_value(example_cfg, "battery", "pack_specific_heat_j_per_kgk")
@@ -487,24 +446,6 @@ def test_dawn_warmup_energy_hand_calc(example_cfg):
     )
     assert w["p_heater_w"] == pytest.approx(p_hand, rel=0.001)
     assert w["energy_wh"] == pytest.approx(p_hand * tau_h, rel=0.001)
-
-
-def test_electric_heater_alt_hand_calc(example_cfg):
-    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    surv = solve_case(
-        "survival_100W", 100, 200, example_cfg,
-        fallback_branch="same_pack_survival",
-        primary_pack=prim.battery,
-        primary_case=prim,
-        transient_mass_kg=prim.battery.mass_kg,
-    )
-    eta = 0.9
-    q_int = 100.0 * (1.0 / eta - 1.0)
-    q_loss_closed = 285.8 + 30.494
-    p_exp = eta * (q_loss_closed - q_int)
-    alt = electric_heater_alternative(surv)
-    assert alt["p_shortfall_w"] == pytest.approx(p_exp, rel=0.001)
-    assert alt["e_heater_wh"] == pytest.approx(p_exp * 72, rel=0.001)
 
 
 LUKE_DESIGN_BLOCKERS = sorted(
@@ -545,37 +486,18 @@ def test_luke_config_has_22_cli_blockers():
     assert sorted(err.value.missing) == LUKE_DESIGN_BLOCKERS
 
 
-def test_survival_carries_primary_radiator_leak_n8(example_cfg):
-    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    surv = solve_case(
-        "survival_100W", 100, 200, example_cfg,
-        fallback_branch="same_pack_survival",
-        primary_pack=prim.battery,
-        primary_case=prim,
-        transient_mass_kg=prim.battery.mass_kg,
-    )
-    louver = param_value(example_cfg, "radiator", "louver_area_multiplier")
-    area_bare = 0.15097993490510722 / louver
-    area_pp = area_bare * louver
-    eps = 0.08
-    t_sink = effective_sink_temperature_k(3.0, 40.0)
-    leak_pp = radiator_night_leak_w(eps, area_pp, 273.15, t_sink, SIGMA_DEFAULT)
-    assert surv.thermal.q_radiator_night_leak_w == pytest.approx(8 * leak_pp, rel=0.001)
-    assert surv.thermal.q_radiator_night_leak_w == pytest.approx(30.49410487884874, rel=0.001)
-
-
 def test_break_even_hand_calc_n8(example_cfg):
     eta_dis = 0.9
     q_closed = 285.8 + 30.494
     p_exp = q_closed / (1.0 / eta_dis - 1.0)
-    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    prim = solve_case("primary_5000W", 5000, 200, example_cfg, case_branch="primary")
     assert prim.break_even_load_w == pytest.approx(p_exp, rel=0.001)
 
 
 def test_cold_margin_alert_at_n16(example_cfg):
     cfg = copy.deepcopy(example_cfg)
     cfg["geometry"]["n_packs"]["value"] = 16
-    prim = solve_case("primary_5000W", 5000, 200, cfg, fallback_branch="primary")
+    prim = solve_case("primary_5000W", 5000, 200, cfg, case_branch="primary")
     cs = solve_cold_shutdown_case(cfg, prim)
     assert cs.coast_margin_lipo_k == pytest.approx(0.238, abs=0.001)
     assert cs.cold_margin_alert is True
@@ -583,25 +505,27 @@ def test_cold_margin_alert_at_n16(example_cfg):
     assert warm["warm_fleet_kwh"] == pytest.approx(30.07, rel=0.001)
 
 
-def test_louvers_stuck_open_delta_n8(example_cfg):
-    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    surv = solve_case(
-        "survival_100W", 100, 200, example_cfg,
-        fallback_branch="same_pack_survival",
-        primary_pack=prim.battery,
-        primary_case=prim,
-        transient_mass_kg=prim.battery.mass_kg,
-    )
+def test_cold_shutdown_stuck_open_n8(example_cfg):
+    prim = solve_case("primary_5000W", 5000, 200, example_cfg, case_branch="primary")
+    cs = solve_cold_shutdown_case(example_cfg, prim)
     mass_pp = prim.battery.mass_kg / max(1, prim.thermal.n_packs)
-    q_int_fleet = 100.0 * (1.0 / 0.9 - 1.0)
-    q_int_pp = q_int_fleet / 8
+    bare = prim.thermal.radiator_bare_area_per_pack_m2
+    e_rad = 0.92
+    t_sink = effective_sink_temperature_k(3.0, 40.0)
+    t0 = 273.15
+    q_box_leg_pp = thermal_q_loss_at_box_t(
+        example_cfg, t0, fleet_capacity_wh=500_000.0, q_excess_per_pack_w=prim.q_excess_w / 8
+    )
+    q_rad_open = e_rad * SIGMA_DEFAULT * bare * max(0.0, t0**4 - t_sink**4)
+    q0 = q_box_leg_pp + q_rad_open
+    t_hand_const = t0 - q0 * 72.0 * 3600.0 / (mass_pp * 1000.0)
     assert mass_pp == pytest.approx(312.5, rel=1e-6)
-    assert q_int_pp == pytest.approx(q_int_fleet / 8, rel=1e-9)
-    assert surv.transient_delta_t_k == pytest.approx(-26.6, abs=0.15)
-    assert surv.louvers_stuck_open_delta_t_k == pytest.approx(-41.6, abs=0.15)
-    assert surv.louvers_stuck_open_delta_t_k < surv.transient_delta_t_k
-    assert 273.15 + surv.louvers_stuck_open_delta_t_k == pytest.approx(231.6, abs=0.15)
-    assert surv.louvers_stuck_below_lipo is True
+    assert cs.coast_t_final_k == pytest.approx(245.57321183820113, rel=0.001)
+    assert cs.coast_stuck_open_t_final_k == pytest.approx(230.70323875995143, rel=0.001)
+    assert t_hand_const < cs.coast_stuck_open_t_final_k
+    assert cs.coast_stuck_open_t_final_k < cs.coast_t_final_k
+    assert cs.coast_stuck_open_margin_lipo_k == pytest.approx(cs.coast_stuck_open_t_final_k - 233.0, rel=0.001)
+    assert cs.louvers_stuck_below_lipo is True
 
 
 def test_streamlit_app_gate_smoke():
