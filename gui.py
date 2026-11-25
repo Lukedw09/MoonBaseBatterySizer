@@ -33,6 +33,24 @@ except ImportError:  # pragma: no cover - headless CI may lack tkinter
 TUNING_PANEL_MIN_WIDTH = 560
 SCALE_LENGTH = 190
 
+GUI_FIELD_LABELS: Dict[str, str] = {
+    "n_packs": "n_packs",
+    "primary_w": "Night load (W)",
+    "t_dark_h": "Night hours",
+    "specific_energy_wh_per_kg_low": "Specific energy low (Wh/kg)",
+    "specific_energy_wh_per_kg_high": "Specific energy high (Wh/kg)",
+    "pack_volumetric_energy_density_wh_per_m3": "Pack volumetric density (Wh/m³)",
+    "depth_of_discharge": "Depth of discharge",
+    "efficiency": "Discharge η",
+    "packaging_insulation_mass_factor": "Packaging factor",
+    "box_target_temperature_k": "T_box (K)",
+    "radiator_temperature_k": "T_rad (K)",
+    "radiator_emissivity": "Radiator ε",
+    "warm_up_h": "Warm-up h",
+    "panel_efficiency": "Panel η",
+    "sun_incidence_cosine": "cos(incidence)",
+}
+
 
 def _horizontal_scale(
     parent: tk.Misc,
@@ -71,8 +89,13 @@ class SizerGUI:
         self.last_working_cfg: Optional[dict] = None
         self.controls: Dict[str, tk.Variable] = {}
         self._scales: Dict[str, tk.Scale] = {}
+        self._field_labels: Dict[str, tk.Widget] = {}
+        self._input_widgets: Dict[str, tk.Widget] = {}
+        self._unset_placeholders: Dict[str, tk.Widget] = {}
         self._owner_labels: Dict[str, tk.Label] = {}
-        self._owner_rows: Dict[str, tk.Widget] = {}
+        self._scale_ui_ids = frozenset(
+            {"depth_of_discharge", "efficiency", "panel_efficiency", "sun_incidence_cosine"}
+        )
         self._tuning_widgets: List[tk.Widget] = []
         self._results_fresh = False
 
@@ -118,13 +141,11 @@ class SizerGUI:
         ttk.Label(right, text="Results").pack(anchor=tk.W)
         text_wrap = ttk.Frame(right)
         text_wrap.pack(fill=tk.BOTH, expand=True)
-        self.results_text = tk.Text(text_wrap, wrap=tk.NONE, state=tk.DISABLED, font=("Courier", 9))
+        self.results_text = tk.Text(text_wrap, wrap=tk.WORD, state=tk.DISABLED, font=("Courier", 9))
         yscroll = ttk.Scrollbar(text_wrap, orient=tk.VERTICAL, command=self.results_text.yview)
-        xscroll = ttk.Scrollbar(text_wrap, orient=tk.HORIZONTAL, command=self.results_text.xview)
-        self.results_text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        self.results_text.configure(yscrollcommand=yscroll.set)
         self.results_text.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
-        xscroll.grid(row=1, column=0, sticky="ew")
         text_wrap.rowconfigure(0, weight=1)
         text_wrap.columnconfigure(0, weight=1)
 
@@ -174,32 +195,66 @@ class SizerGUI:
         build: Callable[[ttk.Frame, tk.Variable], tk.Widget],
     ) -> None:
         row = ttk.Frame(self.tuning_frame)
-        row.pack(fill=tk.X, pady=2)
-        row.columnconfigure(1, weight=1)
-        ttk.Label(row, text=label, width=28).grid(row=0, column=0, rowspan=2, sticky=tk.NW)
-        widget = build(row, var)
+        row.pack(fill=tk.X, pady=2, anchor=tk.W)
+        input_row = ttk.Frame(row)
+        input_row.pack(fill=tk.X, anchor=tk.W)
+        field_lbl = ttk.Label(input_row, text=label, width=28, anchor=tk.W)
+        field_lbl.pack(side=tk.LEFT, anchor=tk.NW)
+        self._field_labels[ui_id] = field_lbl
+        widget = build(input_row, var)
         is_scale = isinstance(widget, tk.Scale)
-        widget.grid(row=0, column=1, sticky=tk.NW if is_scale else tk.EW)
+        self._input_widgets[ui_id] = widget
+        unset_ph = ttk.Label(input_row, text="unset", width=14, anchor=tk.W)
+        self._unset_placeholders[ui_id] = unset_ph
+        if is_scale:
+            widget.pack(side=tk.LEFT, fill=tk.NONE, expand=False)
+            self._scales[ui_id] = widget
+            widget.pack_forget()
+            unset_ph.pack(side=tk.LEFT, padx=4)
+        else:
+            widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            unset_ph.pack_forget()
         own = ttk.Label(
             row,
             text="",
             font=("TkDefaultFont", 8),
             foreground="gray",
-            wraplength=TUNING_PANEL_MIN_WIDTH - 28,
+            wraplength=TUNING_PANEL_MIN_WIDTH - 12,
             justify=tk.LEFT,
         )
-        own.grid(row=1, column=1, sticky=tk.W, pady=(0, 2))
+        own.pack(fill=tk.X, anchor=tk.W, pady=(2, 0), padx=(0, 4))
         self._owner_labels[ui_id] = own
-        self._owner_rows[ui_id] = row
         self.controls[ui_id] = var
-        if is_scale:
-            widget.set(float(var.get()) if not isinstance(var, tk.IntVar) else int(var.get()))
-            self._scales[ui_id] = widget
-        self._tuning_widgets.extend([row, widget, own])
+        self._tuning_widgets.extend([row, input_row, widget, own, unset_ph])
         var.trace_add(
             "write",
             lambda *_args, uid=ui_id: (self._refresh_owner_caption(uid), self._invalidate_saved_results()),
         )
+
+    def _show_control_unset(self, ui_id: str) -> None:
+        widget = self._input_widgets[ui_id]
+        placeholder = self._unset_placeholders[ui_id]
+        if ui_id in self._scale_ui_ids:
+            widget.pack_forget()
+            placeholder.pack(side=tk.LEFT, padx=4)
+        else:
+            var = self.controls[ui_id]
+            var.set("unset")
+
+    def _show_control_value(self, ui_id: str, val: Any) -> None:
+        widget = self._input_widgets[ui_id]
+        placeholder = self._unset_placeholders[ui_id]
+        placeholder.pack_forget()
+        if ui_id in self._scale_ui_ids:
+            fv = float(val)
+            self.controls[ui_id].set(fv)
+            widget.pack(side=tk.LEFT, fill=tk.NONE, expand=False)
+            if ui_id in self._scales:
+                self._scales[ui_id].set(fv)
+        elif ui_id == "n_packs":
+            self.controls[ui_id].set(str(int(val)))
+        else:
+            self.controls[ui_id].set(str(float(val)))
 
     def _build_tuning_controls(self) -> None:
         ttk.Label(
@@ -213,94 +268,97 @@ class SizerGUI:
 
         root = self.root
 
+        def spin(r: ttk.Frame, v: tk.Variable, **kw) -> tk.Widget:
+            return ttk.Spinbox(r, textvariable=v, width=12, **kw)
+
         self._add_control(
             "n_packs",
             "n_packs",
-            tk.IntVar(master=root, value=8),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=1, to=512, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=1, to=512),
         )
         self._add_control(
             "primary_w",
             "Night load (W)",
-            tk.DoubleVar(master=root, value=5000.0),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=0, to=20000, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=0, to=20000),
         )
         self._add_control(
             "t_dark_h",
             "Night hours",
-            tk.DoubleVar(master=root, value=72.0),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=1, to=240, increment=0.5, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=1, to=240, increment=0.5),
         )
         self._add_control(
             "specific_energy_wh_per_kg_low",
             "Specific energy low (Wh/kg)",
-            tk.DoubleVar(master=root, value=150.0),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=50, to=400, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=50, to=400),
         )
         self._add_control(
             "specific_energy_wh_per_kg_high",
             "Specific energy high (Wh/kg)",
-            tk.DoubleVar(master=root, value=200.0),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=50, to=400, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=50, to=400),
         )
         self._add_control(
             "pack_volumetric_energy_density_wh_per_m3",
             "Pack volumetric density (Wh/m³)",
-            tk.DoubleVar(master=root, value=250000.0),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=50000, to=500000, increment=1000, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=50000, to=500000, increment=1000),
         )
         self._add_control(
             "depth_of_discharge",
             "Depth of discharge",
-            tk.DoubleVar(master=root, value=0.8),
+            tk.DoubleVar(master=root),
             build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
         )
         self._add_control(
             "efficiency",
             "Discharge η",
-            tk.DoubleVar(master=root, value=0.9),
+            tk.DoubleVar(master=root),
             build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
         )
         self._add_control(
             "packaging_insulation_mass_factor",
             "Packaging factor",
-            tk.DoubleVar(master=root, value=1.0),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=0.5, to=3.0, increment=0.05, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=0.5, to=3.0, increment=0.05),
         )
         self._add_control(
             "box_target_temperature_k",
             "T_box (K)",
-            tk.DoubleVar(master=root, value=273.15),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=200, to=310, increment=0.5, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=200, to=310, increment=0.5),
         )
         self._add_control(
             "radiator_temperature_k",
             "T_rad (K)",
-            tk.DoubleVar(master=root, value=273.15),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=200, to=310, increment=0.5, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=200, to=310, increment=0.5),
         )
         self._add_control(
             "radiator_emissivity",
             "Radiator ε",
-            tk.DoubleVar(master=root, value=0.9),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=0.05, to=1.0, increment=0.01, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=0.05, to=1.0, increment=0.01),
         )
         self._add_control(
             "warm_up_h",
             "Warm-up h",
-            tk.DoubleVar(master=root, value=6.0),
-            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=0.5, to=24, increment=0.25, width=12),
+            tk.StringVar(master=root, value="unset"),
+            build=lambda r, v: spin(r, v, from_=0.5, to=24, increment=0.25),
         )
         self._add_control(
             "panel_efficiency",
             "Panel η",
-            tk.DoubleVar(master=root, value=0.28),
+            tk.DoubleVar(master=root),
             build=lambda r, v: scale(r, v, 0.05, 0.45, 0.01),
         )
         self._add_control(
             "sun_incidence_cosine",
             "cos(incidence)",
-            tk.DoubleVar(master=root, value=0.35),
+            tk.DoubleVar(master=root),
             build=lambda r, v: scale(r, v, 0.05, 1.0, 0.01),
         )
 
@@ -310,13 +368,19 @@ class SizerGUI:
         keys = UI_CONTROL_TO_CFG_KEYS[ui_id]
         var = self.controls[ui_id]
         base_val = param_value(self.base_cfg, *keys)
-        prior = leaf_owner(self.base_cfg, *keys) or "unknown"
+        prior = leaf_owner(self.base_cfg, *keys) or "TODO-luke"
         if base_val is None:
-            self._owner_labels[ui_id].configure(text=f"owner: {prior} — unset in YAML")
+            self._owner_labels[ui_id].configure(text=f"owner: {prior} (unset)")
             return
         try:
-            cur = int(var.get()) if ui_id == "n_packs" else float(var.get())
-        except tk.TclError:
+            raw = var.get()
+            if ui_id == "n_packs":
+                cur = int(str(raw).strip())
+            elif ui_id in self._scale_ui_ids:
+                cur = float(raw)
+            else:
+                cur = float(str(raw).strip())
+        except (tk.TclError, TypeError, ValueError):
             return
         self._owner_labels[ui_id].configure(
             text=f"owner: {effective_owner_label(self.base_cfg, *keys, current_value=cur)}"
@@ -388,6 +452,8 @@ class SizerGUI:
     def _populate_controls_from_cfg(self, *, allow_partial: bool) -> None:
         assert self.base_cfg is not None
         cfg = self.base_cfg
+        for ui_id in UI_CONTROL_TO_CFG_KEYS:
+            self._show_control_unset(ui_id)
         for ui_id, keys in UI_CONTROL_TO_CFG_KEYS.items():
             val = param_value(cfg, *keys)
             if val is None:
@@ -395,22 +461,15 @@ class SizerGUI:
                 if not allow_partial:
                     raise DesignInputError([f"{'.'.join(keys)}"])
                 continue
-            if ui_id == "n_packs":
-                self.controls[ui_id].set(int(val))
-            else:
-                fv = float(val)
-                self.controls[ui_id].set(fv)
-            if ui_id in self._scales:
-                self._scales[ui_id].set(int(val) if ui_id == "n_packs" else float(val))
+            self._show_control_value(ui_id, val)
             self._refresh_owner_caption(ui_id)
 
     def _sync_all_scales(self) -> None:
         for ui_id, scale in self._scales.items():
-            var = self.controls[ui_id]
-            if ui_id == "n_packs":
-                scale.set(int(var.get()))
-            else:
-                scale.set(float(var.get()))
+            val = param_value(self.base_cfg or {}, *UI_CONTROL_TO_CFG_KEYS[ui_id])
+            if val is None:
+                continue
+            scale.set(float(val))
 
     def run_sizing(self) -> None:
         blocked, messages = app_gate_blocked(self.base_cfg or {})

@@ -127,7 +127,68 @@ def test_luke_config_read_only_tuning_run_save_disabled():
     assert str(app.run_btn.cget("state")) == tk.DISABLED
     assert str(app.pdf_btn.cget("state")) == tk.DISABLED
     assert "luke" in app._owner_labels["pack_volumetric_energy_density_wh_per_m3"].cget("text").lower()
-    assert "unset in YAML" in app._owner_labels["radiator_temperature_k"].cget("text")
+    assert "(unset)" in app._owner_labels["radiator_temperature_k"].cget("text")
+    root.destroy()
+
+
+def test_every_control_has_visible_label_and_owner_caption():
+    import tkinter as tk
+
+    from gui import GUI_FIELD_LABELS, SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG)
+    root.update()
+    assert set(GUI_FIELD_LABELS) == set(app._field_labels) == set(app._owner_labels)
+    for ui_id, text in GUI_FIELD_LABELS.items():
+        lbl = app._field_labels[ui_id]
+        own = app._owner_labels[ui_id]
+        assert lbl.cget("text") == text
+        assert lbl.winfo_ismapped()
+        assert own.winfo_ismapped()
+        assert own.cget("text").startswith("owner:")
+        assert len(own.cget("text")) > 6
+    root.destroy()
+
+
+def test_scale_widgets_exist_mapped_with_value_labels():
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    expected = {"depth_of_discharge", "efficiency", "panel_efficiency", "sun_incidence_cosine"}
+    root = tk.Tk()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG)
+    root.update()
+    assert set(app._scales) == expected
+    for uid, scale in app._scales.items():
+        assert scale.winfo_ismapped()
+        assert int(scale.cget("showvalue")) == 1
+        assert scale.cget("state") == tk.NORMAL
+        assert uid in app._field_labels
+    root.destroy()
+
+
+def test_luke_blocked_yaml_unset_controls_not_invented_values():
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import LUKE_CFG, UI_CONTROL_TO_CFG_KEYS
+    from sizer import param_value
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=LUKE_CFG)
+    root.update()
+    blocked_keys = ("n_packs", "radiator_emissivity", "radiator_temperature_k")
+    for ui_id in blocked_keys:
+        assert param_value(app.base_cfg, *UI_CONTROL_TO_CFG_KEYS[ui_id]) is None
+        assert app.controls[ui_id].get() == "unset"
+        assert "TODO-luke" in app._owner_labels[ui_id].cget("text")
+        assert "(unset)" in app._owner_labels[ui_id].cget("text")
     root.destroy()
 
 
@@ -144,7 +205,7 @@ def test_save_pdf_disabled_after_control_change():
     app.run_sizing()
     root.update()
     assert str(app.pdf_btn.cget("state")) == tk.NORMAL
-    app.controls["n_packs"].set(2)
+    app.controls["n_packs"].set("2")
     root.update()
     assert str(app.pdf_btn.cget("state")) == tk.DISABLED
     root.destroy()
@@ -170,6 +231,6 @@ def test_n_packs_spinbox_keeps_config_value_above_slider_max():
     root.withdraw()
     app = SizerGUI(root, config_path=cfg_path)
     root.update()
-    assert int(app.controls["n_packs"].get()) == 32
+    assert app.controls["n_packs"].get() == "32"
     assert int(param_value(app.base_cfg, "geometry", "n_packs")) == 32
     root.destroy()

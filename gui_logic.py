@@ -115,7 +115,10 @@ def collect_ui_values(control_values: Mapping[str, Any]) -> Dict[Tuple[str, ...]
         raw = control_values[ui_id]
         if callable(getattr(raw, "get", None)):
             raw = raw.get()
-        out[keys] = int(raw) if ui_id == "n_packs" else float(raw)
+        text = str(raw).strip()
+        if text in ("", "unset"):
+            raise ValueError(f"UI control {ui_id!r} has no value")
+        out[keys] = int(text) if ui_id == "n_packs" else float(text)
     return out
 
 
