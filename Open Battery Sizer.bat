@@ -14,15 +14,6 @@ if not errorlevel 1 (
   if errorlevel 2 if not errorlevel 3 set "PY_TOO_OLD=1"
   if not errorlevel 1 set "PY=py -3"
 )
-if defined PY_TOO_OLD (
-  echo.
-  echo  This sizer needs Python 3.9 or newer.
-  echo  Download a current Python 3 at:
-  echo    https://www.python.org/downloads/
-  echo.
-  pause
-  exit /b 1
-)
 if not defined PY (
   where python >nul 2>&1
   if not errorlevel 1 (
@@ -38,6 +29,15 @@ if not defined PY (
     )
     if not errorlevel 1 set "PY=python"
   )
+)
+if not defined PY if defined PY_TOO_OLD (
+  echo.
+  echo  This sizer needs Python 3.9 or newer.
+  echo  Download a current Python 3 at:
+  echo    https://www.python.org/downloads/
+  echo.
+  pause
+  exit /b 1
 )
 if not defined PY (
   echo.

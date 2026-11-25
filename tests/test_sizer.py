@@ -65,6 +65,8 @@ from sizer import (
     format_n_packs_table,
     SWEEP_PDF_PAGE_LABEL,
     SWEEP_PDF_GLYPH_WIDTH_SCALE,
+    sweep_pdf_glyph_width_scale,
+    N_PACK_SWEEP_FONT_SIZE,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -578,6 +580,12 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     assert "BELOW LiPo limit" in text
 
 
+def test_sweep_glyph_width_scale_derived_from_font_size():
+    ref = sweep_pdf_glyph_width_scale(N_PACK_SWEEP_FONT_SIZE)
+    assert ref == pytest.approx(SWEEP_PDF_GLYPH_WIDTH_SCALE)
+    assert sweep_pdf_glyph_width_scale(N_PACK_SWEEP_FONT_SIZE * 2) == pytest.approx(ref * 2)
+
+
 def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatch):
     import matplotlib.pyplot as plt
 
@@ -610,7 +618,8 @@ def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatc
     )
     sweep_figs = [f for f in captured_figs if f.get_label() == SWEEP_PDF_PAGE_LABEL]
     assert sweep_figs, "write_report_pdf did not emit an n-packs sweep figure"
-    # Agg extents understate PDF width (~6.0 vs ~6.27 px/char); scale then cap at ~0.91 page width.
+    # Agg extents understate PDF width (see sweep_pdf_glyph_width_scale); cap at ~0.91 page width
+    # (~1 monospace char slack at 7.5pt/100dpi — tighten if sweep columns are added).
     try:
         for fig in sweep_figs:
             w_px, extents = figure_text_extents_pdf_scaled(fig)

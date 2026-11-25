@@ -22,8 +22,23 @@ N_PACK_SWEEP_LINE_DY = 0.0135
 N_PACK_SWEEP_FONT_SIZE = 7.5
 N_PACK_SWEEP_X_FRAC = 0.06
 SWEEP_PDF_PAGE_LABEL = "moonbase_n_pack_sweep"
-# Agg window extents round monospace ~6.0 px/char; embedded PDF is closer to ~6.27 px/char at 7.5 pt.
-SWEEP_PDF_GLYPH_WIDTH_SCALE = 6.27 / 6.0
+N_PACK_SWEEP_FIGURE_DPI = 100.0
+# Empirical monospace px/char measured at N_PACK_SWEEP_FONT_SIZE and N_PACK_SWEEP_FIGURE_DPI.
+_SWEEP_GLYPH_SCREEN_PX_PER_CHAR_AT_REF = 6.0
+_SWEEP_GLYPH_PDF_PX_PER_CHAR_AT_REF = 6.27
+_SWEEP_GLYPH_REF_FONT_PT = 7.5
+
+
+def sweep_pdf_glyph_width_scale(
+    font_pt: float = N_PACK_SWEEP_FONT_SIZE,
+    dpi: float = N_PACK_SWEEP_FIGURE_DPI,
+) -> float:
+    """Scale Agg text bbox width to embedded PDF; linear in font_pt at fixed matplotlib dpi."""
+    font_scale = font_pt / _SWEEP_GLYPH_REF_FONT_PT
+    return (_SWEEP_GLYPH_PDF_PX_PER_CHAR_AT_REF / _SWEEP_GLYPH_SCREEN_PX_PER_CHAR_AT_REF) * font_scale
+
+
+SWEEP_PDF_GLYPH_WIDTH_SCALE = sweep_pdf_glyph_width_scale()
 
 # Paths that must be set (value not null) before a full sizing run.
 DESIGN_PATHS = [
