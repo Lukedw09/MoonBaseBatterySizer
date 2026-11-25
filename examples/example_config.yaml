@@ -35,7 +35,7 @@ battery:
     units: dimensionless
     source: "Luke"
     owner: luke
-  round_trip_efficiency:
+  efficiency:
     value: 0.9
     units: dimensionless
     source: "Luke"
@@ -43,8 +43,8 @@ battery:
   eta_definition:
     value: "round_trip"
     units: "round_trip | discharge"
-    source: "Example — use round_trip until Luke chooses"
-    owner: cited-example
+    source: "EXAMPLE placeholder until Luke chooses (round_trip uses sqrt(eta) for both capacity and Q_internal)"
+    owner: placeholder
   specific_energy_wh_per_kg_low:
     value: 150
     units: Wh/kg
@@ -59,7 +59,7 @@ battery:
     value: 1.0
     units: dimensionless
     source: "EXAMPLE placeholder — not Luke's choice"
-    owner: cited-example
+    owner: placeholder
   bus_voltage_v:
     value: 1000
     units: V
@@ -69,7 +69,7 @@ battery:
     value: 3.7
     units: V
     source: "EXAMPLE Li-ion nominal — uncited until Luke picks cell"
-    owner: cited-example
+    owner: placeholder
   cell_capacity_ah:
     value: null
     units: Ah
@@ -98,8 +98,8 @@ battery:
   pack_specific_heat_j_per_kgk:
     value: 1000
     units: J/kg-K
-    source: "Order-of-magnitude pack effective cp — handbook example"
-    owner: cited-example
+    source: "EXAMPLE pack effective cp — not from Luke's data"
+    owner: placeholder
 
 thermal_environment:
   deep_space_sink_k:
@@ -132,38 +132,43 @@ thermal_environment:
     units: W/m^2-K
     source: "Okishio et al. 2015 ICES-2015-318"
     owner: cited-example
+  lander_deck_temperature_k:
+    value: null
+    units: K
+    source: "Required if bottom_radiates_to=lander_deck"
+    owner: TODO-luke
 
 geometry:
   n_battery_boxes:
     value: 8
     units: count
     source: "EXAMPLE ring count"
-    owner: cited-example
+    owner: placeholder
   box_length_m:
     value: 1.0
     units: m
     source: "EXAMPLE"
-    owner: cited-example
+    owner: placeholder
   box_width_m:
     value: 0.8
     units: m
     source: "EXAMPLE"
-    owner: cited-example
+    owner: placeholder
   box_height_m:
     value: 0.6
     units: m
     source: "EXAMPLE"
-    owner: cited-example
+    owner: placeholder
   ring_radius_m:
     value: 3.0
     units: m
     source: "EXAMPLE"
-    owner: cited-example
+    owner: placeholder
   bottom_radiates_to:
     value: "ground"
     units: string
     source: "EXAMPLE — bottom to regolith"
-    owner: cited-example
+    owner: placeholder
   view_factor_sky_vertical:
     value: 0.5
     units: dimensionless
@@ -185,7 +190,7 @@ radiation:
     value: 1.0
     units: dimensionless
     source: "EXAMPLE no extra penalty"
-    owner: cited-example
+    owner: placeholder
   emittance_sensitivity:
     - { value: 0.015, label: "MLI low (Gilmore)" }
     - { value: 0.02, label: "MLI mid" }
@@ -211,22 +216,27 @@ lander_legs:
     value: 0.001
     units: m^2
     source: "EXAMPLE conduction area"
-    owner: cited-example
+    owner: placeholder
   leg_length_m:
     value: 1.0
     units: m
     source: "EXAMPLE"
-    owner: cited-example
+    owner: placeholder
+  leg_perimeter_m:
+    value: 0.126
+    units: m
+    source: "EXAMPLE wetted perimeter (hollow strut placeholder)"
+    owner: placeholder
   leg_surface_emissivity:
     value: 0.9
     units: dimensionless
-    source: "EXAMPLE bare Ti paint-equivalent"
-    owner: cited-example
+    source: "EXAMPLE painted metal finish (not bare Ti)"
+    owner: placeholder
   footpad_area_m2:
     value: 0.05
     units: m^2
     source: "EXAMPLE disk area"
-    owner: cited-example
+    owner: placeholder
   leg_fin_segments:
     value: 12
     units: count
@@ -241,7 +251,7 @@ losses:
     value: 0
     units: W
     source: "EXAMPLE"
-    owner: cited-example
+    owner: placeholder
 
 rtg:
   count_list:
@@ -250,20 +260,20 @@ rtg:
     source: "Luke"
     owner: luke
   coupling_fraction:
-    value: 0.35
+    value: 0.034
     units: dimensionless
-    source: "EXAMPLE guess for radiative ring coupling — Luke must choose"
-    owner: cited-example
+    source: "EXAMPLE ≈ radiative helper (0.034); heat pipe/fluid loop would raise — Luke must choose"
+    owner: placeholder
   heat_path:
     value: "radiative"
     units: string
-    source: "EXAMPLE"
-    owner: cited-example
+    source: "EXAMPLE placeholder"
+    owner: placeholder
   inward_face_absorptance:
     value: 0.8
     units: dimensionless
-    source: "EXAMPLE for coupling helper"
-    owner: cited-example
+    source: "EXAMPLE for radiative coupling helper only"
+    owner: placeholder
   thermal_output_w:
     value: null
     units: W
@@ -280,7 +290,7 @@ fallback:
     value: 250000
     units: Wh/m^3
     source: "EXAMPLE for separate_pack branch only"
-    owner: cited-example
+    owner: placeholder
 
 physics:
   stefan_boltzmann_w_per_m2k4: 5.670374419e-8

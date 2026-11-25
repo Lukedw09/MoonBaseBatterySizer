@@ -34,6 +34,8 @@ DESIGN_PATHS = [
     ("losses", "passthrough_w"),
     ("rtg", "coupling_fraction"),
     ("rtg", "heat_path"),
+    ("battery", "eta_definition"),
+    ("lander_legs", "leg_perimeter_m"),
 ]
 
 # TODO-luke fields that may stay null (still listed in report for Luke).
@@ -41,8 +43,8 @@ NON_BLOCKING_TODO_PATHS = {
     "battery.cell_capacity_ah",
     "battery.capacity_derating_factor_at_0c",
     "battery.minimum_charge_temperature_k",
-    "battery.eta_definition",
     "battery.pack_specific_heat_j_per_kgk",
+    "thermal_environment.lander_deck_temperature_k",
     "fallback.mode",
     "rtg.thermal_output_w",
     "radiation.penetration_seam_emittance_multiplier",
@@ -155,39 +157,35 @@ def validate_for_run(cfg: Dict[str, Any], allow_incomplete: bool = False) -> Non
         raise DesignInputError(missing)
 
 
-def discharge_efficiency_for_sizing(eta: float, eta_definition: Optional[str]) -> Tuple[float, Optional[float]]:
-    """
-    Pack sizing uses discharge-side efficiency only.
-    Returns (eta_discharge, eta_rt_if_round_trip).
-    """
+def battery_efficiency_value(cfg: Dict[str, Any]) -> float:
+    if "efficiency" in cfg.get("battery", {}):
+        return param_value(cfg, "battery", "efficiency")
+    return param_value(cfg, "battery", "round_trip_efficiency")
+
+
+def discharge_efficiency_for_sizing(eta: float, eta_definition: str) -> float:
+    """Pack sizing uses discharge-side efficiency only (requires eta_definition)."""
     if eta_definition == "round_trip":
-        eta_dis = math.sqrt(eta)
-        return eta_dis, eta
+        return math.sqrt(eta)
     if eta_definition == "discharge":
-        return eta, None
-    return math.sqrt(eta), eta  # when unset, sizing uses sqrt(eta); both Q_internal reported
+        return eta
+    raise ConfigError(f"Unknown eta_definition: {eta_definition}")
 
 
-def internal_waste_heat_w(p_load_w: float, eta: float, eta_definition: Optional[str]) -> Dict[str, float]:
-    """Battery discharge loss heats the pack."""
-    out: Dict[str, float] = {
+def internal_waste_heat_w(p_load_w: float, eta: float) -> Dict[str, float]:
+    """Always compute both interpretations for display; active one chosen via eta_definition."""
+    return {
         "round_trip_definition": p_load_w * (1.0 / math.sqrt(eta) - 1.0),
         "discharge_definition": p_load_w * (1.0 / eta - 1.0),
     }
-    if eta_definition == "round_trip":
-        out["discharge_definition"] = out["round_trip_definition"]
-    elif eta_definition == "discharge":
-        out["round_trip_definition"] = p_load_w * (1.0 / math.sqrt(eta) - 1.0)
-        out["discharge_definition"] = p_load_w * (1.0 / eta - 1.0)
-    return out
 
 
-def pick_internal_heat(q_map: Dict[str, float], eta_definition: Optional[str]) -> Tuple[float, str]:
+def pick_internal_heat(q_map: Dict[str, float], eta_definition: str) -> Tuple[float, str]:
     if eta_definition == "round_trip":
         return q_map["round_trip_definition"], "round_trip"
     if eta_definition == "discharge":
         return q_map["discharge_definition"], "discharge"
-    return q_map["discharge_definition"], "discharge (default until eta_definition chosen)"
+    raise ConfigError("eta_definition must be round_trip or discharge")
 
 
 def compute_night_energy_wh(p_load_w: float, p_heater_w: float, t_dark_h: float) -> float:
@@ -411,7 +409,10 @@ def leg_conduction_network_w(
     h_contact: float,
     k_regolith: float,
 ) -> float:
-    """Known R-network: leg || leg ... conduction to surface (testable)."""
+    """
+    Standalone R-network reference (tests only — not added to fin loss).
+    Full leg R in series: leg metal + contact + regolith spreading.
+    """
     if n_legs <= 0:
         raise ConfigError("lander_legs.n_legs must be positive.")
     if length_m <= 0 or a_cross <= 0 or k_leg <= 0:
@@ -425,77 +426,136 @@ def leg_conduction_network_w(
     return max(0.0, n_legs * (t_box_k - t_surface_k) / r_path)
 
 
-def _wetted_perimeter_from_area(a_cross: float) -> float:
-    """Square-equivalent perimeter for leg radiation."""
-    side = math.sqrt(a_cross) if a_cross > 0 else 0.0
-    return 4.0 * side
+def foot_thermal_resistance_k_per_w(footpad_area: float, h_contact: float, k_regolith: float) -> float:
+    r_contact = 1.0 / (h_contact * footpad_area) if h_contact > 0 and footpad_area > 0 else float("inf")
+    r_reg = regolith_spreading_resistance_k_per_w(footpad_area, k_regolith)
+    return r_contact + r_reg
 
 
-def leg_radiating_fin_loss_w(
-    n_legs: int,
-    k_leg: float,
-    a_cross: float,
-    length_m: float,
-    leg_emissivity: float,
-    t_box_k: float,
-    t_sky_k: float,
-    t_ground_k: float,
-    f_sky: float,
-    f_ground: float,
-    n_segments: int,
-    sigma: float,
-) -> float:
-    """
-    1-D discretized radiating fin along each leg (Incropera fin with radiation sink).
-    Sky/ground split on vertical leg surface (Wohl vertical factors).
-    """
-    if n_legs <= 0 or length_m <= 0 or n_segments < 2:
-        return 0.0
-    dz = length_m / (n_segments - 1)
-    perimeter = _wetted_perimeter_m_from_area(a_cross)
-    area_slice = perimeter * dz
+def radiative_loss_per_length_w(T: float, perimeter_m: float, emissivity: float, t_sky: float, t_ground: float,
+                              f_sky: float, f_ground: float, sigma: float) -> float:
+    """Power lost per meter of leg length at temperature T (W/m)."""
     s = f_sky + f_ground
     fs = f_sky / s if s > 0 else 0.5
     fg = f_ground / s if s > 0 else 0.5
+    t4 = T**4
+    qd = fs * (t4 - t_sky**4) + fg * (t4 - t_ground**4)
+    return max(0.0, emissivity * sigma * perimeter_m * qd)
 
-    def q_rad(T: float) -> float:
-        t4 = T**4
-        return leg_emissivity * sigma * area_slice * (fs * (t4 - t_sky_k**4) + fg * (t4 - t_ground_k**4))
 
-    T = [t_box_k + (t_ground_k - t_box_k) * i / (n_segments - 1) for i in range(n_segments)]
-    for _ in range(200):
-        max_dT = 0.0
-        T_new = T[:]
-        for i in range(1, n_segments - 1):
-            q = max(0.0, q_rad(T[i]))
-            cond = k_leg * a_cross / dz
-            T_new[i] = (cond * (T[i - 1] + T[i + 1]) - q * dz) / (2.0 * cond)
-            max_dT = max(max_dT, abs(T_new[i] - T[i]))
-        T[0] = t_box_k
-        T[-1] = t_ground_k
-        for i in range(1, n_segments - 1):
-            T[i] = T_new[i]
-        if max_dT < 1e-4:
+def analytic_constant_h_fin_w(
+    k_leg: float, a_cross: float, perimeter_m: float, length_m: float, t_root: float, t_inf: float, h_lin: float,
+) -> float:
+    """Incropera straight fin, insulated tip: Q = M*(Tb-Tinf)*tanh(mL), m=sqrt(hP/(kA))."""
+    m = math.sqrt(h_lin * perimeter_m / (k_leg * a_cross))
+    m_val = math.sqrt(h_lin * perimeter_m * k_leg * a_cross)
+    return m_val * (t_root - t_inf) * math.tanh(m * length_m)
+
+
+def finite_difference_constant_h_fin_w(
+    k_leg: float, a_cross: float, perimeter_m: float, length_m: float, t_root: float, t_inf: float,
+    h_lin: float, n_nodes: int,
+) -> float:
+    """FD linear fin (constant h, adiabatic tip). Heat reported at root."""
+    if n_nodes < 2:
+        raise ValueError("n_nodes >= 2")
+    dx = length_m / (n_nodes - 1)
+    ka = k_leg * a_cross
+    T = [t_root + (t_inf - t_root) * i / (n_nodes - 1) for i in range(n_nodes)]
+    T[0] = t_root
+    for _ in range(800):
+        Tn = T[:]
+        for i in range(1, n_nodes - 1):
+            ql = h_lin * perimeter_m * (T[i] - t_inf)
+            Tn[i] = 0.5 * (T[i - 1] + T[i + 1]) - ql * dx**2 / (2.0 * ka)
+        ql_tip = h_lin * perimeter_m * (T[-1] - t_inf)
+        Tn[-1] = T[-2] - ql_tip * dx**2 / (2.0 * ka)
+        T[0] = t_root
+        for i in range(1, n_nodes):
+            T[i] = 0.45 * Tn[i] + 0.55 * T[i]
+        if max(abs(Tn[i] - T[i]) for i in range(1, n_nodes)) < 1e-6:
             break
-    q_total = 0.0
-    for i in range(n_segments):
-        q_total += max(0.0, q_rad(T[i]))
-    return max(0.0, n_legs * q_total)
+    q_sum = 0.0
+    for i in range(1, n_nodes - 1):
+        q_sum += h_lin * perimeter_m * (T[i] - t_inf) * dx
+    q_sum += h_lin * perimeter_m * (T[-1] - t_inf) * dx * 0.5
+    q_sum += h_lin * perimeter_m * (T[0] - t_inf) * dx * 0.5
+    return q_sum
 
 
-def _wetted_perimeter_m_from_area(a_cross: float) -> float:
-    return _wetted_perimeter_from_area(a_cross)
+def solve_radiating_leg_fin(
+    k_leg: float,
+    a_cross: float,
+    perimeter_m: float,
+    length_m: float,
+    leg_emissivity: float,
+    t_root_k: float,
+    t_sky_k: float,
+    t_ground_k: float,
+    t_surf_k: float,
+    f_sky: float,
+    f_ground: float,
+    footpad_area: float,
+    h_contact: float,
+    k_regolith: float,
+    n_nodes: int,
+    sigma: float,
+) -> Tuple[float, float, List[float]]:
+    """1-D radiating fin, fixed root T, foot via R_contact+R_regolith (not pinned to t_surf)."""
+    if n_nodes < 3 or length_m <= 0:
+        return 0.0, t_surf_k, [t_root_k]
+    r_foot = foot_thermal_resistance_k_per_w(footpad_area, h_contact, k_regolith)
+    g_foot = 1.0 / r_foot if r_foot > 0 and math.isfinite(r_foot) else 0.0
+    ka = k_leg * a_cross
+    dx = length_m / (n_nodes - 1)
+    omega = 0.45
+    T = [t_root_k + (t_surf_k - t_root_k) * i / (n_nodes - 1) for i in range(n_nodes)]
+    T[0] = t_root_k
+
+    for _ in range(500):
+        Tn = T[:]
+        for i in range(1, n_nodes - 1):
+            ql = radiative_loss_per_length_w(
+                T[i], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
+            )
+            Tn[i] = 0.5 * (T[i - 1] + T[i + 1]) - ql * dx**2 / (2.0 * ka)
+        ql_tip = radiative_loss_per_length_w(
+            T[-1], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
+        )
+        q_f = g_foot * (T[-1] - t_surf_k)
+        Tn[-1] = T[-2] - (ql_tip * dx * 0.5 + q_f) * dx / ka
+        T[0] = t_root_k
+        for i in range(1, n_nodes):
+            T[i] = (1 - omega) * T[i] + omega * Tn[i]
+        if max(abs(Tn[i] - T[i]) for i in range(1, n_nodes)) < 1e-5:
+            break
+
+    q_rad_sum = 0.0
+    for i in range(1, n_nodes - 1):
+        q_rad_sum += radiative_loss_per_length_w(
+            T[i], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
+        ) * dx
+    q_rad_sum += radiative_loss_per_length_w(
+        T[-1], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
+    ) * dx * 0.5
+    q_rad_sum += radiative_loss_per_length_w(
+        T[0], perimeter_m, leg_emissivity, t_sky_k, t_ground_k, f_sky, f_ground, sigma
+    ) * dx * 0.5
+    q_foot = g_foot * (T[-1] - t_surf_k)
+    return max(0.0, q_rad_sum + q_foot), T[-1], T
 
 
 def legs_total_loss_w(
     n_legs: int,
     k_leg: float,
     a_cross: float,
+    perimeter_m: float,
     length_m: float,
     leg_eps: float,
     t_box_k: float,
     t_sky_k: float,
     t_ground_k: float,
+    t_surf_k: float,
     footpad_area: float,
     h_contact: float,
     k_regolith: float,
@@ -503,26 +563,35 @@ def legs_total_loss_w(
     f_ground: float,
     n_segments: int,
     sigma: float,
-) -> Tuple[float, float]:
-    """Radiating fin + conduction through pad network to regolith."""
-    q_rad = leg_radiating_fin_loss_w(
-        n_legs, k_leg, a_cross, length_m, leg_eps, t_box_k, t_sky_k, t_ground_k, f_sky, f_ground, n_segments, sigma
+) -> Tuple[float, float, float]:
+    """Single fin model only (radiation + foot R to regolith). Returns Q_total, T_foot, Q at surface k."""
+    if n_legs <= 0:
+        raise ConfigError("lander_legs.n_legs must be positive.")
+    q_one, t_foot, _ = solve_radiating_leg_fin(
+        k_leg, a_cross, perimeter_m, length_m, leg_eps, t_box_k, t_sky_k, t_ground_k, t_surf_k,
+        f_sky, f_ground, footpad_area, h_contact, k_regolith, n_segments, sigma,
     )
-    q_cond = leg_conduction_network_w(
-        n_legs, k_leg, a_cross, length_m, t_box_k, t_ground_k, footpad_area, h_contact, k_regolith
-    )
-    return q_rad + q_cond, q_rad
+    return n_legs * q_one, t_foot, q_one
 
 
 @dataclass
 class ThermalLoss:
     q_box_rad_w: float
     q_leg_w: float
-    q_leg_rad_w: float
+    q_leg_at_surface_k_w: float
+    q_leg_at_depth_k_w: float
+    t_leg_foot_k: float
     q_passthrough_w: float
     q_total_w: float
+    q_total_at_depth_k_w: float
     area_radiating_m2: float
-    regolith_k_used_w_mk: float
+
+
+def leg_perimeter_m(cfg: Dict[str, Any]) -> float:
+    p = param_value(cfg, "lander_legs", "leg_perimeter_m")
+    if p is not None and p > 0:
+        return float(p)
+    raise ConfigError("lander_legs.leg_perimeter_m must be set (TODO-luke — tube/hollow strut wetted perimeter).")
 
 
 def compute_thermal_loss(
@@ -531,7 +600,9 @@ def compute_thermal_loss(
     t_box = param_value(cfg, "battery", "box_target_temperature_k")
     t_sky = param_value(cfg, "thermal_environment", "deep_space_sink_k")
     t_ground = param_value(cfg, "thermal_environment", "night_surface_k")
+    t_deck = param_value(cfg, "thermal_environment", "lander_deck_temperature_k")
     k_reg_surf = param_value(cfg, "thermal_environment", "regolith_k_surface_w_per_mk")
+    k_reg_depth = param_value(cfg, "thermal_environment", "regolith_k_depth_w_per_mk")
     h_contact = param_value(cfg, "thermal_environment", "footpad_contact_conductance_w_per_m2k")
 
     e_box = emittance if emittance is not None else param_value(cfg, "radiation", "box_effective_emittance")
@@ -554,28 +625,38 @@ def compute_thermal_loss(
     leg_eps = param_value(cfg, "lander_legs", "leg_surface_emissivity")
     footpad_a = param_value(cfg, "lander_legs", "footpad_area_m2")
     n_seg = param_value(cfg, "lander_legs", "leg_fin_segments") or 12
+    perim = leg_perimeter_m(cfg)
 
     passthrough = param_value(cfg, "losses", "passthrough_w") or 0.0
 
+    if bottom_to == "lander_deck" and t_deck is None:
+        raise ConfigError("bottom_radiates_to=lander_deck requires thermal_environment.lander_deck_temperature_k")
+    t_bottom_sink = t_deck if bottom_to == "lander_deck" else t_ground
+
     q_rad, area, _ = box_radiation_loss_w(
-        n_boxes, box_l, box_w, box_h, ring_r, e_box, t_box, t_sky, t_ground, t_box,
+        n_boxes, box_l, box_w, box_h, ring_r, e_box, t_box, t_sky, t_ground, t_bottom_sink,
         bottom_to, f_sky, f_g, e_mult, sigma,
     )
-    k_depth = param_value(cfg, "thermal_environment", "regolith_k_depth_w_per_mk")
-    q_leg, q_leg_rad = legs_total_loss_w(
-        n_legs, k_leg, a_cross, leg_len, leg_eps, t_box, t_sky, t_ground,
+    q_leg_surf, t_foot, _ = legs_total_loss_w(
+        n_legs, k_leg, a_cross, perim, leg_len, leg_eps, t_box, t_sky, t_ground, t_ground,
         footpad_a, h_contact, k_reg_surf, f_sky, f_g, n_seg, sigma,
     )
-    # depth k logged via regolith_k_used; spread resistance formula uses disk R=1/(4ka)
-    _ = k_depth
+    q_leg_depth, _, _ = legs_total_loss_w(
+        n_legs, k_leg, a_cross, perim, leg_len, leg_eps, t_box, t_sky, t_ground, t_ground,
+        footpad_a, h_contact, k_reg_depth, f_sky, f_g, n_seg, sigma,
+    )
+    q_total_surf = q_rad + q_leg_surf + passthrough
+    q_total_depth = q_rad + q_leg_depth + passthrough
     return ThermalLoss(
         q_box_rad_w=q_rad,
-        q_leg_w=q_leg,
-        q_leg_rad_w=q_leg_rad,
+        q_leg_w=q_leg_surf,
+        q_leg_at_surface_k_w=q_leg_surf,
+        q_leg_at_depth_k_w=q_leg_depth,
+        t_leg_foot_k=t_foot,
         q_passthrough_w=passthrough,
-        q_total_w=q_rad + q_leg + passthrough,
+        q_total_w=q_total_surf,
+        q_total_at_depth_k_w=q_total_depth,
         area_radiating_m2=area,
-        regolith_k_used_w_mk=k_reg_surf,
     )
 
 
@@ -649,6 +730,7 @@ class CaseResult:
     iterations: int
     transient_delta_t_k: Optional[float]
     transient_below_lipo: Optional[bool]
+    transient_warning: Optional[str]
     radiative_coupling_info: Optional[float]
 
 
@@ -681,15 +763,19 @@ def solve_case(
     fallback_branch: str = "primary",
     emittance: Optional[float] = None,
     k_leg: Optional[float] = None,
-    max_iter: int = 25,
-    tol_w: float = 1e-3,
+    primary_pack: Optional[BatterySizing] = None,
+    transient_mass_kg: Optional[float] = None,
+    max_iter: int = 40,
+    tol_w: float = 1e-2,
 ) -> CaseResult:
     validate_for_run(cfg)
     mode = param_value(cfg, "meta", "mode") or "solve_rtg"
     t_dark = param_value(cfg, "night", "t_dark_h")
     dod = param_value(cfg, "battery", "depth_of_discharge")
-    eta = param_value(cfg, "battery", "round_trip_efficiency")
+    eta = battery_efficiency_value(cfg)
     eta_def = param_value(cfg, "battery", "eta_definition")
+    if not eta_def:
+        raise ConfigError("battery.eta_definition must be round_trip or discharge")
     packaging = param_value(cfg, "battery", "packaging_insulation_mass_factor")
     bus_v = param_value(cfg, "battery", "bus_voltage_v")
     cell_v = param_value(cfg, "battery", "cell_nominal_voltage_v")
@@ -698,25 +784,29 @@ def solve_case(
     lipo_lim = param_value(cfg, "battery", "lipo_cold_limit_k")
     t_box = param_value(cfg, "battery", "box_target_temperature_k")
 
-    eta_dis, _ = discharge_efficiency_for_sizing(eta, eta_def)
+    eta_dis = discharge_efficiency_for_sizing(eta, eta_def)
     coupling = param_value(cfg, "rtg", "coupling_fraction")
     rtg_counts: List[int] = param_value(cfg, "rtg", "count_list") or []
     q_rtg_fixed = param_value(cfg, "rtg", "thermal_output_w")
 
-    q_int_map = internal_waste_heat_w(load_w, eta, eta_def)
+    q_int_map = internal_waste_heat_w(load_w, eta)
     q_internal, q_note = pick_internal_heat(q_int_map, eta_def)
 
     p_heater = 0.0
     iterations = 0
     thermal_cfg = cfg
-    geometry_scales_with_mass = fallback_branch == "separate_pack"
+    geometry_scales = fallback_branch == "separate_pack"
+    iterate = geometry_scales or mode == "fixed_rtg"
 
-    for loop_i in range(max_iter if geometry_scales_with_mass else 1):
+    for loop_i in range(max_iter if iterate else 1):
         iterations = loop_i + 1
         battery = size_battery_pack(
             load_w, p_heater, t_dark, dod, eta_dis, specific_energy, packaging, bus_v, cell_v, cell_ah
         )
-        if geometry_scales_with_mass:
+        if fallback_branch == "same_pack_survival" and primary_pack is not None:
+            battery.mass_kg = primary_pack.mass_kg
+            battery.capacity_wh = primary_pack.capacity_wh
+        if geometry_scales:
             scale_info = scaled_geometry_for_separate_pack(cfg, battery.mass_kg, specific_energy)
             if scale_info:
                 import copy
@@ -724,8 +814,7 @@ def solve_case(
                 thermal_cfg = copy.deepcopy(cfg)
                 s = scale_info["scale"]
                 for key in ("box_length_m", "box_width_m", "box_height_m"):
-                    node = thermal_cfg["geometry"][key]
-                    node["value"] = param_value(cfg, "geometry", key) * s
+                    thermal_cfg["geometry"][key]["value"] = param_value(cfg, "geometry", key) * s
 
         thermal = compute_thermal_loss(thermal_cfg, emittance=emittance, k_leg=k_leg)
         if mode == "fixed_rtg":
@@ -734,47 +823,48 @@ def solve_case(
             if coupling is None:
                 raise ConfigError("fixed_rtg requires rtg.coupling_fraction")
             new_heater = heater_shortfall_w(thermal.q_total_w, q_internal, coupling, float(q_rtg_fixed))
-            if not geometry_scales_with_mass or abs(new_heater - p_heater) < tol_w:
+            if abs(new_heater - p_heater) < tol_w:
                 p_heater = new_heater
-                if not geometry_scales_with_mass:
-                    break
-            else:
-                p_heater = new_heater
-                continue
+                break
+            p_heater = new_heater
+        else:
+            p_heater = 0.0
             break
-        p_heater = 0.0
-        break
     else:
-        if geometry_scales_with_mass:
-            sys.stderr.write(f"Warning: separate_pack heater/geometry loop hit max_iter={max_iter}\n")
+        if iterate:
+            sys.stderr.write(f"Warning: heater/geometry loop hit max_iter={max_iter} ({load_name})\n")
 
     if mode == "fixed_rtg" and q_rtg_fixed is not None:
         q_rtg_total = float(q_rtg_fixed)
         q_msg = "fixed_rtg mode — using rtg.thermal_output_w"
         excess = max(0.0, q_internal - thermal.q_total_w)
+    elif coupling is None:
+        q_rtg_total = None
+        q_msg = "RTG need cannot be computed until rtg.coupling_fraction is chosen (Q_loss reported)."
+        excess = max(0.0, q_internal - thermal.q_total_w)
     else:
-        if coupling is None:
-            q_rtg_total = None
-            q_msg = "RTG need cannot be computed until rtg.coupling_fraction is chosen (Q_loss reported)."
-            excess = max(0.0, q_internal - thermal.q_total_w)
-        else:
-            q_rtg_total, excess = net_rtg_need_w(thermal.q_total_w, q_internal, coupling)
-            q_msg = "solve_rtg: Q_RTG = max(0,Q_loss-Q_internal)/coupling"
+        q_rtg_total, excess = net_rtg_need_w(thermal.q_total_w, q_internal, coupling)
+        q_msg = "solve_rtg: Q_RTG = max(0,Q_loss-Q_internal)/coupling"
 
     per_unit = {n: q_rtg_total / n for n in rtg_counts if n > 0 and q_rtg_total is not None}
 
+    mass_for_transient = transient_mass_kg or (primary_pack.mass_kg if primary_pack else battery.mass_kg)
     q_net_no_rtg = thermal.q_total_w - q_internal
-    dT = lumped_transient_delta_t_k(q_net_no_rtg, battery.mass_kg, cp, t_dark)
+    dT = lumped_transient_delta_t_k(q_net_no_rtg, mass_for_transient, cp, t_dark)
     below_lipo = (t_box + dT < lipo_lim) if dT is not None else None
+    twarn = None
+    if dT is not None:
+        if t_box + dT < 0:
+            twarn = f"nonphysical transient: T_final={t_box + dT:.1f} K (< 0)"
+        elif below_lipo:
+            twarn = f"transient below LiPo limit ({lipo_lim} K)"
 
-    absorp = param_value(cfg, "rtg", "inward_face_absorptance")
-    n_b = param_value(cfg, "geometry", "n_battery_boxes")
     rad_couple = informational_radiative_coupling(
-        n_b,
+        param_value(cfg, "geometry", "n_battery_boxes"),
         param_value(cfg, "geometry", "box_length_m"),
         param_value(cfg, "geometry", "box_height_m"),
         param_value(cfg, "geometry", "ring_radius_m"),
-        absorp,
+        param_value(cfg, "rtg", "inward_face_absorptance"),
     )
 
     return CaseResult(
@@ -795,6 +885,7 @@ def solve_case(
         iterations=iterations,
         transient_delta_t_k=dT,
         transient_below_lipo=below_lipo,
+        transient_warning=twarn,
         radiative_coupling_info=rad_couple,
     )
 
@@ -805,6 +896,14 @@ def todo_luke_list(cfg: Dict[str, Any]) -> List[str]:
         if row["owner"] == "TODO-luke":
             suffix = " (unset)" if row["value"] == "(unset)" else ""
             rows.append(f"{row['path']}: {row['value']} {row['units']} — {row['source']}{suffix}")
+    return rows
+
+
+def placeholder_list(cfg: Dict[str, Any]) -> List[str]:
+    rows = []
+    for row in flatten_inputs(cfg):
+        if row["owner"] == "placeholder":
+            rows.append(f"{row['path']}: {row['value']} {row['units']} — {row['source']}")
     return rows
 
 
@@ -831,7 +930,11 @@ def format_results_table(results: List[CaseResult], coupling_set: bool) -> str:
         lines.append(f"  N_series      = {b.n_series}")
         lines.append(
             f"  Q_loss total  = {r.thermal.q_total_w:.1f} W "
-            f"(box rad {r.thermal.q_box_rad_w:.1f}, legs {r.thermal.q_leg_w:.1f})"
+            f"(box rad {r.thermal.q_box_rad_w:.1f}, legs {r.thermal.q_leg_w:.1f}, foot≈{r.thermal.t_leg_foot_k:.0f} K)"
+        )
+        lines.append(
+            f"  Q_loss @ Hayne depth k = {r.thermal.q_total_at_depth_k_w:.1f} W "
+            f"(legs {r.thermal.q_leg_at_depth_k_w:.1f} W)"
         )
         if r.q_excess_w > 0:
             lines.append(f"  Q_excess      = {r.q_excess_w:.1f} W (overheat risk — internal > loss)")
@@ -845,6 +948,8 @@ def format_results_table(results: List[CaseResult], coupling_set: bool) -> str:
             lines.append(f"  Info only: radiative coupling estimate ≈ {r.radiative_coupling_info:.4f}")
         if r.transient_delta_t_k is not None:
             lines.append(f"  Transient ΔT (no RTG) ≈ {r.transient_delta_t_k:.2f} K")
+        if r.transient_warning:
+            lines.append(f"  WARNING: {r.transient_warning}")
     lines.append(
         "\nThermal driver note: effective emittance × radiating area dominates Q_loss; "
         "T_sky/T_ground shifts are small compared to T_box."
@@ -859,13 +964,18 @@ def format_results_table(results: List[CaseResult], coupling_set: bool) -> str:
 def run_all_cases(cfg: Dict[str, Any]) -> List[CaseResult]:
     se_low = param_value(cfg, "battery", "specific_energy_wh_per_kg_low")
     se_high = param_value(cfg, "battery", "specific_energy_wh_per_kg_high")
+    primary_w = param_value(cfg, "loads", "primary_w")
     loads = [
-        ("primary_5000W", param_value(cfg, "loads", "primary_w")),
+        ("primary_5000W", primary_w),
         ("survival_100W", param_value(cfg, "loads", "survival_high_w")),
         ("survival_50W", param_value(cfg, "loads", "survival_low_w")),
     ]
     fb = param_value(cfg, "fallback", "mode")
     survival_branches = ["same_pack_survival", "separate_pack"] if fb is None else [fb]
+
+    primary_by_se: Dict[float, CaseResult] = {}
+    for se in (se_low, se_high):
+        primary_by_se[se] = solve_case("primary_5000W", primary_w, se, cfg, fallback_branch="primary")
 
     results: List[CaseResult] = []
     for name, pw in loads:
@@ -873,7 +983,21 @@ def run_all_cases(cfg: Dict[str, Any]) -> List[CaseResult]:
         branch_list = ["primary"] if is_primary else survival_branches
         for se in (se_low, se_high):
             for br in branch_list:
-                results.append(solve_case(name, pw, se, cfg, fallback_branch=br))
+                if is_primary:
+                    results.append(primary_by_se[se])
+                    continue
+                prim = primary_by_se[se].battery
+                results.append(
+                    solve_case(
+                        name,
+                        pw,
+                        se,
+                        cfg,
+                        fallback_branch=br,
+                        primary_pack=prim if br == "same_pack_survival" else None,
+                        transient_mass_kg=prim.mass_kg if br == "same_pack_survival" else None,
+                    )
+                )
     return results
 
 
@@ -955,11 +1079,18 @@ def write_report_pdf(
         fig, ax = plt.subplots(figsize=(8.5, 11))
         ax.axis("off")
         y = 0.95
-        ax.text(0.05, y, "Values Luke still needs to choose:", fontweight="bold")
-        y -= 0.03
+        ph = placeholder_list(cfg)
+        if ph:
+            ax.text(0.05, y, "placeholder values (not Luke design):", fontweight="bold")
+            y -= 0.025
+            for t in ph[:20]:
+                ax.text(0.05, y, f"• {t[:92]}", fontsize=5)
+                y -= 0.018
+        ax.text(0.05, max(0.35, y), "Values Luke still needs to choose:", fontweight="bold")
+        y2 = max(0.32, y - 0.025)
         for t in todos:
-            ax.text(0.05, y, f"• {t[:92]}", fontsize=6)
-            y -= 0.02
+            ax.text(0.05, y2, f"• {t[:92]}", fontsize=6)
+            y2 -= 0.02
         if not coupling_set:
             ax.text(0.05, 0.15, "RTG need not computed — coupling_fraction unset.", fontsize=8)
         pdf.savefig(fig)
@@ -990,7 +1121,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     todos = todo_luke_list(cfg)
     coupling_set = param_value(cfg, "rtg", "coupling_fraction") is not None
 
+    placeholders = placeholder_list(cfg)
     print(format_results_table(results, coupling_set))
+    if placeholders:
+        print("\n--- placeholder (example values, not Luke's design) ---")
+        for t in placeholders:
+            print(f"  • {t}")
     print("\n--- TODO-luke (complete list) ---")
     for t in todos:
         print(f"  • {t}")

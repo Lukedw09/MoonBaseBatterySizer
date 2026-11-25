@@ -36,10 +36,10 @@ battery:
     units: dimensionless
     source: "Luke"
     owner: luke
-  round_trip_efficiency:
+  efficiency:
     value: 0.9
     units: dimensionless
-    source: "Luke"
+    source: "Luke — meaning set by eta_definition"
     owner: luke
   eta_definition:
     value: null
@@ -133,6 +133,11 @@ thermal_environment:
     units: W/m^2-K
     source: "Okishio et al. 2015 ICES-2015-318 (example contact conductance)"
     owner: cited-example
+  lander_deck_temperature_k:
+    value: null
+    units: K
+    source: "Required when box bottom sees lander_deck (not T_box default)"
+    owner: TODO-luke
 
 geometry:
   n_battery_boxes:
@@ -230,6 +235,11 @@ lander_legs:
     value: null
     units: m^2
     source: "Luke — one footpad contact area (disk area for constriction R)"
+    owner: TODO-luke
+  leg_perimeter_m:
+    value: null
+    units: m
+    source: "Luke — wetted leg perimeter (tube/hollow strut)"
     owner: TODO-luke
   leg_fin_segments:
     value: 12
