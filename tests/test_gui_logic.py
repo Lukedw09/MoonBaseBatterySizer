@@ -133,17 +133,12 @@ def test_app_gate_blocks_radiator_above_box_temperature(example_cfg):
     assert any("≤" in m or "<=" in m for m in messages)
 
 
-def test_last_working_cfg_mismatch_if_controls_change_after_run(example_cfg):
-    controls = {
-        ui_id: _FakeVar(param_value(example_cfg, *keys))
-        for ui_id, keys in gui_logic.UI_CONTROL_TO_CFG_KEYS.items()
-    }
-    cfg_run, _, _, _ = gui_logic.run_sizing_report(example_cfg, controls)
-    n_run = int(param_value(cfg_run, "geometry", "n_packs"))
-    controls["n_packs"] = _FakeVar(2)
-    cfg_now = gui_logic.build_working_cfg(example_cfg, controls)
-    assert int(param_value(cfg_now, "geometry", "n_packs")) == 2
-    assert n_run != 2
+def test_parse_ui_n_packs_range_and_integer():
+    with pytest.raises(gui_logic.UiInputError, match="integer"):
+        gui_logic.parse_ui_control_value("n_packs", "abc")
+    with pytest.raises(gui_logic.UiInputError, match="512"):
+        gui_logic.parse_ui_control_value("n_packs", 600)
+    assert gui_logic.parse_ui_control_value("n_packs", "32") == 32
 
 
 def test_pytest_gui_logic_passes_with_tkinter_blocked_subprocess():

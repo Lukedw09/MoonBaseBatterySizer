@@ -2017,6 +2017,60 @@ def figure_text_extents_pdf_scaled(
     return w_px, scaled
 
 
+_PDF_NOTES_WRAP_COLS = 120
+_PDF_NOTES_Y_MIN = 0.05
+_PDF_NOTES_LINE_DY = 0.018
+_PDF_NOTES_CONT_X = 0.08
+
+
+def _pdf_wrap_bullet_lines(text: str, width: int = _PDF_NOTES_WRAP_COLS) -> List[str]:
+    import textwrap
+
+    wrapped = textwrap.wrap(text, width=max(20, width - 2))
+    if not wrapped:
+        return ["•"]
+    lines = [f"• {wrapped[0]}"]
+    for cont in wrapped[1:]:
+        lines.append(f"  {cont}")
+    return lines
+
+
+def _pdf_notes_continuation(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+) -> Tuple[Any, Any, float]:
+    import matplotlib.pyplot as plt
+
+    if y >= _PDF_NOTES_Y_MIN:
+        return fig, ax, y
+    pdf.savefig(fig)
+    plt.close(fig)
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.axis("off")
+    return fig, ax, 0.95
+
+
+def _pdf_draw_wrapped_bullets(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+    items: List[str],
+    *,
+    fontsize: float = 5,
+    wrap_width: int = _PDF_NOTES_WRAP_COLS,
+) -> Tuple[Any, Any, float]:
+    for item in items:
+        for line in _pdf_wrap_bullet_lines(item, wrap_width):
+            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+            x = _PDF_NOTES_CONT_X if line.startswith("  ") else 0.05
+            ax.text(x, y, line, fontsize=fontsize)
+            y -= _PDF_NOTES_LINE_DY
+    return fig, ax, y
+
+
 def write_report_pdf(
     path: Path,
     cfg: Dict[str, Any],
@@ -2090,16 +2144,14 @@ def write_report_pdf(
         if ph:
             ax.text(0.05, y, "placeholder values (not Luke design):", fontweight="bold")
             y -= 0.025
-            for t in ph[:20]:
-                ax.text(0.05, y, f"• {t[:120]}", fontsize=5)
-                y -= 0.018
-        ax.text(0.05, max(0.35, y), "Values Luke still needs to choose:", fontweight="bold")
-        y2 = max(0.32, y - 0.025)
-        for t in todos:
-            ax.text(0.05, y2, f"• {t[:92]}", fontsize=6)
-            y2 -= 0.02
+            fig, ax, y = _pdf_draw_wrapped_bullets(pdf, fig, ax, y, ph[:20], fontsize=5)
+        fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y - 0.02)
+        ax.text(0.05, y, "Values Luke still needs to choose:", fontweight="bold")
+        y -= 0.025
+        fig, ax, y = _pdf_draw_wrapped_bullets(pdf, fig, ax, y, todos, fontsize=6, wrap_width=110)
+        fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y - 0.02)
         if not coupling_set:
-            ax.text(0.05, 0.15, "RTG need not computed — coupling_fraction unset.", fontsize=8)
+            ax.text(0.05, max(_PDF_NOTES_Y_MIN, y), "RTG need not computed — coupling_fraction unset.", fontsize=8)
         pdf.savefig(fig)
         plt.close(fig)
 

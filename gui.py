@@ -17,6 +17,8 @@ from gui_logic import (
     leaf_owner,
     load_config,
     param_value,
+    UiInputError,
+    parse_ui_control_value,
     run_sizing_report,
     write_sizing_pdf,
 )
@@ -98,6 +100,8 @@ class SizerGUI:
         )
         self._tuning_widgets: List[tk.Widget] = []
         self._results_fresh = False
+        self._controls_editable = True
+        self._input_invalid = False
 
         top = ttk.Frame(root, padding=8)
         top.pack(fill=tk.X)
@@ -211,6 +215,8 @@ class SizerGUI:
             self._scales[ui_id] = widget
             widget.pack_forget()
             unset_ph.pack(side=tk.LEFT, padx=4)
+            for seq in ("<Button-1>", "<B1-Motion>", "<ButtonRelease-1>", "<Key>", "<MouseWheel>"):
+                widget.bind(seq, self._block_scale_if_readonly, add="+")
         else:
             widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
             unset_ph.pack_forget()
@@ -228,8 +234,17 @@ class SizerGUI:
         self._tuning_widgets.extend([row, input_row, widget, own, unset_ph])
         var.trace_add(
             "write",
-            lambda *_args, uid=ui_id: (self._refresh_owner_caption(uid), self._invalidate_saved_results()),
+            lambda *_args, uid=ui_id: (
+                self._refresh_owner_caption(uid),
+                self._invalidate_saved_results(),
+                self._update_run_button_state(),
+            ),
         )
+
+    def _block_scale_if_readonly(self, _event: tk.Event) -> Optional[str]:
+        if not self._controls_editable:
+            return "break"
+        return None
 
     def _show_control_unset(self, ui_id: str) -> None:
         widget = self._input_widgets[ui_id]
@@ -373,18 +388,33 @@ class SizerGUI:
             self._owner_labels[ui_id].configure(text=f"owner: {prior} (unset)")
             return
         try:
-            raw = var.get()
-            if ui_id == "n_packs":
-                cur = int(str(raw).strip())
-            elif ui_id in self._scale_ui_ids:
-                cur = float(raw)
-            else:
-                cur = float(str(raw).strip())
-        except (tk.TclError, TypeError, ValueError):
+            cur = parse_ui_control_value(ui_id, var)
+        except (UiInputError, tk.TclError, TypeError, ValueError):
+            self._owner_labels[ui_id].configure(text=f"owner: {prior} — invalid input")
             return
         self._owner_labels[ui_id].configure(
             text=f"owner: {effective_owner_label(self.base_cfg, *keys, current_value=cur)}"
         )
+
+    def _any_control_invalid(self) -> bool:
+        if not self.base_cfg:
+            return True
+        for ui_id in UI_CONTROL_TO_CFG_KEYS:
+            if param_value(self.base_cfg, *UI_CONTROL_TO_CFG_KEYS[ui_id]) is None:
+                continue
+            try:
+                parse_ui_control_value(ui_id, self.controls[ui_id])
+            except (UiInputError, tk.TclError, TypeError, ValueError):
+                return True
+        return False
+
+    def _update_run_button_state(self) -> None:
+        self._input_invalid = self._any_control_invalid()
+        if not self._controls_editable:
+            self.run_btn.configure(state=tk.DISABLED)
+            return
+        gate_ok = not app_gate_blocked(self.base_cfg or {})[0]
+        self.run_btn.configure(state=tk.NORMAL if gate_ok and not self._input_invalid else tk.DISABLED)
 
     def _invalidate_saved_results(self) -> None:
         if self._results_fresh:
@@ -392,6 +422,7 @@ class SizerGUI:
             self.pdf_btn.configure(state=tk.DISABLED)
 
     def _set_tuning_state(self, enabled: bool) -> None:
+        self._controls_editable = enabled
         state = tk.NORMAL if enabled else tk.DISABLED
         for w in self._tuning_widgets:
             if isinstance(w, tk.Scale):
@@ -400,8 +431,10 @@ class SizerGUI:
                 w.configure(state=state)
             except tk.TclError:
                 pass
-        self.run_btn.configure(state=state)
-        if not enabled:
+        if enabled:
+            self._update_run_button_state()
+        else:
+            self.run_btn.configure(state=tk.DISABLED)
             self.pdf_btn.configure(state=tk.DISABLED)
 
     def _set_results(self, text: str) -> None:
@@ -445,6 +478,7 @@ class SizerGUI:
             return
 
         self._set_tuning_state(True)
+        self._update_run_button_state()
         self._set_results(f"Loaded: {path.name}\n\nAdjust sliders if needed, then click Run sizing.")
         self.root.after_idle(self._sync_all_scales)
         self.root.after_idle(self._fit_window_to_content)
@@ -476,6 +510,10 @@ class SizerGUI:
         if blocked:
             self._set_results("Blocked:\n" + "\n".join(f"  • {m}" for m in messages))
             return
+        if self._input_invalid or self._any_control_invalid():
+            self._set_results("Fix invalid tuning inputs (see owner captions) before Run sizing.")
+            self._update_run_button_state()
+            return
         try:
             cfg, text, results, sens = run_sizing_report(self.base_cfg or {}, self.controls)
             self.last_working_cfg = copy.deepcopy(cfg)
@@ -485,7 +523,11 @@ class SizerGUI:
             self._results_fresh = True
             self.pdf_btn.configure(state=tk.NORMAL)
         except Exception as e:
-            messagebox.showerror("Run failed", str(e))
+            if isinstance(e, UiInputError):
+                self._set_results(f"Input error:\n  • {e}")
+                self._update_run_button_state()
+            else:
+                messagebox.showerror("Run failed", str(e))
 
     def save_pdf(self) -> None:
         if (

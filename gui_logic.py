@@ -26,6 +26,14 @@ ROOT = Path(__file__).resolve().parent
 LUKE_CFG = ROOT / "config.yaml"
 EXAMPLE_CFG = ROOT / "examples" / "example_config.yaml"
 
+N_PACKS_UI_MIN = 1
+N_PACKS_UI_MAX = 512
+
+
+class UiInputError(ValueError):
+    """Raised when a tuning widget value cannot be parsed for sizing."""
+
+
 UI_CONTROL_TO_CFG_KEYS: Dict[str, Tuple[str, ...]] = {
     "n_packs": ("geometry", "n_packs"),
     "primary_w": ("loads", "primary_w"),
@@ -108,17 +116,31 @@ def app_gate_blocked(cfg: dict) -> Tuple[bool, List[str]]:
     return False, []
 
 
+def parse_ui_control_value(ui_id: str, raw: Any) -> Union[int, float]:
+    if callable(getattr(raw, "get", None)):
+        raw = raw.get()
+    text = str(raw).strip()
+    if text in ("", "unset"):
+        raise UiInputError(f"{ui_id}: value is unset")
+    if ui_id == "n_packs":
+        try:
+            n = int(text)
+        except ValueError as e:
+            raise UiInputError(f"n_packs must be an integer (got {text!r})") from e
+        if n < N_PACKS_UI_MIN or n > N_PACKS_UI_MAX:
+            raise UiInputError(f"n_packs must be {N_PACKS_UI_MIN}..{N_PACKS_UI_MAX} (got {n})")
+        return n
+    try:
+        return float(text)
+    except ValueError as e:
+        raise UiInputError(f"{ui_id}: not a number (got {text!r})") from e
+
+
 def collect_ui_values(control_values: Mapping[str, Any]) -> Dict[Tuple[str, ...], Any]:
     """Map UI control ids to YAML param paths (values from widgets or test fakes)."""
     out: Dict[Tuple[str, ...], Any] = {}
     for ui_id, keys in UI_CONTROL_TO_CFG_KEYS.items():
-        raw = control_values[ui_id]
-        if callable(getattr(raw, "get", None)):
-            raw = raw.get()
-        text = str(raw).strip()
-        if text in ("", "unset"):
-            raise ValueError(f"UI control {ui_id!r} has no value")
-        out[keys] = int(text) if ui_id == "n_packs" else float(text)
+        out[keys] = parse_ui_control_value(ui_id, control_values[ui_id])
     return out
 
 

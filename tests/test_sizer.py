@@ -561,7 +561,8 @@ def test_examples_report_pdf_page3_nasa_pack_density_citation():
     assert pdf.is_file()
     text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
     assert "EXAMPLE ~250 Wh/L" in text
-    assert "; NASA" in text
+    assert "Table 3-5" in text
+    assert "CubeSat" in text
     assert "Luke to confirm" not in text
     assert "EXAMPLE pack-level ~250 kWh" not in text
 

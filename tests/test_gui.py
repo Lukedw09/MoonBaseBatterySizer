@@ -183,20 +183,81 @@ def test_luke_blocked_yaml_unset_controls_not_invented_values():
     root.withdraw()
     app = SizerGUI(root, config_path=LUKE_CFG)
     root.update()
-    blocked_keys = ("n_packs", "radiator_emissivity", "radiator_temperature_k")
-    for ui_id in blocked_keys:
+    null_ui_keys = (
+        "n_packs",
+        "packaging_insulation_mass_factor",
+        "radiator_temperature_k",
+        "radiator_emissivity",
+        "panel_efficiency",
+        "sun_incidence_cosine",
+    )
+    for ui_id in null_ui_keys:
         assert param_value(app.base_cfg, *UI_CONTROL_TO_CFG_KEYS[ui_id]) is None
-        assert app.controls[ui_id].get() == "unset"
         assert "TODO-luke" in app._owner_labels[ui_id].cget("text")
         assert "(unset)" in app._owner_labels[ui_id].cget("text")
+        if ui_id in app._scale_ui_ids:
+            assert not app._scales[ui_id].winfo_ismapped()
+            assert app._unset_placeholders[ui_id].winfo_ismapped()
+        else:
+            assert app.controls[ui_id].get() == "unset"
     root.destroy()
 
 
-def test_save_pdf_disabled_after_control_change():
+def test_blocked_scale_interaction_does_not_change_value_or_owner():
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import LUKE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=LUKE_CFG)
+    root.update()
+    assert not app._controls_editable
+    eff = app._scales["efficiency"]
+    v0 = float(eff.get())
+    cap_before = app._owner_labels["efficiency"].cget("text")
+    eff.event_generate("<Button-1>", x=40, y=8)
+    eff.event_generate("<B1-Motion>", x=eff.winfo_width() - 10, y=8)
+    eff.event_generate("<ButtonRelease-1>", x=eff.winfo_width() - 10, y=8)
+    root.update()
+    assert float(eff.get()) == pytest.approx(v0)
+    assert app._owner_labels["efficiency"].cget("text") == cap_before
+    assert "ui-override" not in cap_before
+    root.destroy()
+
+
+def test_invalid_primary_w_caption_and_run_disabled():
     import tkinter as tk
 
     from gui import SizerGUI
     from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG)
+    root.update()
+    assert str(app.run_btn.cget("state")) == tk.NORMAL
+    app.controls["n_packs"].set("abc")
+    root.update()
+    assert "invalid" in app._owner_labels["n_packs"].cget("text")
+    assert str(app.run_btn.cget("state")) == tk.DISABLED
+    root.destroy()
+
+
+def test_save_pdf_disabled_then_reflects_n_packs_after_rerun(tmp_path, monkeypatch):
+    pytest.importorskip("pypdf")
+    import tkinter as tk
+    from pypdf import PdfReader
+
+    import gui
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    out_pdf = tmp_path / "gui_saved.pdf"
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **kw: str(out_pdf))
+    monkeypatch.setattr(gui.messagebox, "showinfo", lambda *a, **k: None)
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: None)
 
     root = tk.Tk()
     root.withdraw()
@@ -208,10 +269,16 @@ def test_save_pdf_disabled_after_control_change():
     app.controls["n_packs"].set("2")
     root.update()
     assert str(app.pdf_btn.cget("state")) == tk.DISABLED
+    app.run_sizing()
+    root.update()
+    assert app.controls["n_packs"].get() == "2"
+    app.save_pdf()
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(out_pdf).pages)
+    assert "geometry.n_packs: 2" in text
     root.destroy()
 
 
-def test_n_packs_spinbox_keeps_config_value_above_slider_max():
+def test_n_packs_spinbox_keeps_config_value_above_slider_max(tmp_path):
     import copy
 
     import tkinter as tk
@@ -221,10 +288,9 @@ def test_n_packs_spinbox_keeps_config_value_above_slider_max():
     from gui_logic import EXAMPLE_CFG
     from sizer import load_config, param_value
 
-    cfg_path = ROOT / "artifacts" / "_n32_config.yaml"
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     cfg = copy.deepcopy(load_config(EXAMPLE_CFG))
     cfg["geometry"]["n_packs"]["value"] = 32
+    cfg_path = tmp_path / "n32.yaml"
     cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
 
     root = tk.Tk()
