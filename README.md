@@ -2,7 +2,18 @@
 
 Python 3 tool for the **NASA Moon Base Challenge**: sizes **distributed lunar night battery packs** with **per-pack radiators** and **dawn wake solar panels**. Luke owns design numbers in YAML (`owner`: `luke`, `cited-example`, `placeholder`, `numerical`, `TODO-luke`).
 
-## Quick start (CLI)
+## Open the slider UI (easiest — no terminal)
+
+1. On GitHub, click **Code → Download ZIP** and unzip the folder anywhere on your computer.
+2. Open the unzipped project folder.
+3. **Double-click** the launcher for your system:
+   - **Windows:** `Open Battery Sizer.bat`
+   - **macOS:** `Open Battery Sizer.command` (first time: right-click → Open if Gatekeeper asks)
+   - **Linux:** `open_battery_sizer.sh` (or double-click if your desktop allows; otherwise run it from a terminal once)
+
+The first launch creates a local `.venv` folder and installs dependencies; later launches are faster. Your browser should open the sizer automatically. If anything fails, the launcher window stays open with a plain-English message (install Python 3 from [python.org](https://www.python.org/downloads/) if prompted).
+
+## Quick start (CLI — fallback)
 
 ```bash
 pip install -r requirements.txt
@@ -10,11 +21,16 @@ python3 sizer.py config.yaml          # blocks until Luke fills TODO-luke fields
 python3 sizer.py examples/example_config.yaml --pdf examples/report.pdf
 ```
 
-## Interactive UI (Streamlit)
+## Interactive UI (manual Streamlit)
 
-1. Install dependencies: `pip install -r requirements.txt`
-2. Start the app: `streamlit run app.py`
-3. Sliders adjust loads, pack count, volumetric density, temperatures, and wake-panel inputs; results and the **n_packs** sweep refresh on **Run sizing**. Download the PDF from the button. Default config is **EXAMPLE ONLY** (`examples/example_config.yaml`).
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Default config in the app is **EXAMPLE ONLY** (`examples/example_config.yaml`). Sliders adjust loads, pack count, volumetric density, temperatures, and wake-panel inputs; **Run sizing** refreshes results and the **n_packs** sweep. Download the PDF from the button.
 
 ## Layout
 
