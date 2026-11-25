@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import gui_logic
-from sizer import ConfigError, load_config, param_value
+from sizer import ConfigError, layout_unused_input_messages, load_config, param_value
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "example_config.yaml"
@@ -95,7 +95,7 @@ def test_gui_ui_override_only_on_change(example_cfg):
 def test_gui_blocker_gate_blocks_luke_config():
     blocked, messages = gui_logic.app_gate_blocked(load_config(LUKE_CFG))
     assert blocked
-    assert len(messages) == 21
+    assert len(messages) == 20
 
 
 def test_gui_blocker_gate_allows_example_config(example_cfg):
@@ -131,6 +131,16 @@ def test_app_gate_blocks_radiator_above_box_temperature(example_cfg):
     assert blocked
     assert any("radiator_temperature_k" in m for m in messages)
     assert any("≤" in m or "<=" in m for m in messages)
+
+
+def test_luke_gate_lists_layout_unused_notes():
+    luke = load_config(LUKE_CFG)
+    blocked, messages = gui_logic.app_gate_blocked(luke)
+    assert blocked
+    assert len(messages) == 20
+    assert not any("bottom_radiates_to" in m for m in messages)
+    notes = layout_unused_input_messages(luke)
+    assert any("bottom_radiates_to" in n for n in notes)
 
 
 def test_n_packs_249_run_sizing_report_raises_leg_mesh_error(example_cfg):

@@ -155,6 +155,8 @@ def blocking_missing(cfg: Dict[str, Any]) -> List[str]:
     for row in flatten_inputs(cfg):
         if row["owner"] != "TODO-luke" or row["value"] != "(unset)":
             continue
+        if layout_unused_input_note(cfg, row["path"]):
+            continue
         if row["path"] in NON_BLOCKING_TODO_PATHS or row["path"] in design_dotted:
             continue
         if row["path"] == "rtg.thermal_output_w" and mode != "fixed_rtg":
@@ -192,6 +194,35 @@ def validate_for_run(cfg: Dict[str, Any], allow_incomplete: bool = False) -> Non
     missing = blocking_missing(cfg)
     if missing and not allow_incomplete:
         raise DesignInputError(missing)
+
+
+def layout_model(cfg: Dict[str, Any]) -> str:
+    return str(param_value(cfg, "layout", "model") or "distributed_packs")
+
+
+def layout_unused_input_note(cfg: Dict[str, Any], path: str) -> Optional[str]:
+    """Explain geometry fields ignored by the active layout model (not sizing blockers)."""
+    model = layout_model(cfg)
+    if model == "distributed_packs":
+        if path in ("geometry.bottom_radiates_to", "geometry.ring_radius_m"):
+            return "not used by distributed_packs layout (bottom to ground)"
+        if path == "thermal_environment.lander_deck_temperature_k":
+            return "not used by distributed_packs layout (bottom to ground)"
+    elif model == "ring_rtg":
+        if path == "thermal_environment.lander_deck_temperature_k":
+            bottom = param_value(cfg, "geometry", "bottom_radiates_to")
+            if bottom != "lander_deck":
+                return "not used unless bottom_radiates_to=lander_deck"
+    return None
+
+
+def layout_unused_input_messages(cfg: Dict[str, Any]) -> List[str]:
+    rows: List[str] = []
+    for row in flatten_inputs(cfg):
+        note = layout_unused_input_note(cfg, row["path"])
+        if note:
+            rows.append(f"{row['path']}: {row['value']} — {note}")
+    return rows
 
 
 def battery_efficiency_value(cfg: Dict[str, Any]) -> float:
@@ -2052,6 +2083,38 @@ def _pdf_notes_continuation(
     return fig, ax, 0.95
 
 
+_PDF_BODY_TEXT_WIDTH = 95
+
+
+def _pdf_draw_wrapped_text_block(
+    pdf: Any,
+    fig: Any,
+    ax: Any,
+    y: float,
+    text: str,
+    *,
+    fontsize: float = 7,
+    dy: float = _PDF_NOTES_LINE_DY,
+    wrap_width: int = _PDF_BODY_TEXT_WIDTH,
+    family: Optional[str] = None,
+    fontweight: Optional[str] = None,
+) -> Tuple[Any, Any, float]:
+    import textwrap
+
+    for raw in text.splitlines():
+        chunks = textwrap.wrap(raw, width=wrap_width) if raw else [""]
+        for line in chunks:
+            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+            kwargs: Dict[str, Any] = {"fontsize": fontsize, "va": "top"}
+            if family:
+                kwargs["family"] = family
+            if fontweight:
+                kwargs["fontweight"] = fontweight
+            ax.text(0.05, y, line, **kwargs)
+            y -= dy
+    return fig, ax, y
+
+
 def _pdf_draw_plain_lines(
     pdf: Any,
     fig: Any,
@@ -2095,11 +2158,31 @@ def _pdf_format_result_block(r: "CaseResult") -> str:
     return block
 
 
+def fin_solver_error_is_n_packs_mesh_limit(cfg: Dict[str, Any], err: FinSolverError) -> bool:
+    """Max mesh-node failures from high pack count with otherwise plausible leg geometry."""
+    if "maximum number of mesh nodes" not in str(err).lower():
+        return False
+    leg_len = param_value(cfg, "lander_legs", "leg_length_m")
+    a_cross = param_value(cfg, "lander_legs", "leg_cross_section_m2")
+    if leg_len is None or a_cross is None:
+        return False
+    if float(leg_len) > 5.0 or float(a_cross) < 1e-5:
+        return False
+    return True
+
+
 def n_packs_leg_mesh_config_error(cfg: Dict[str, Any], err: FinSolverError) -> ConfigError:
     n = param_value(cfg, "geometry", "n_packs")
+    leg_len = param_value(cfg, "lander_legs", "leg_length_m")
+    a_cross = param_value(cfg, "lander_legs", "leg_cross_section_m2")
+    if fin_solver_error_is_n_packs_mesh_limit(cfg, err):
+        return ConfigError(
+            f"n_packs too large for leg thermal mesh at n_packs={n} "
+            f"(radiator/leg BVP did not converge — try lowering pack count): {err}"
+        )
     return ConfigError(
-        f"n_packs too large for leg thermal mesh at n_packs={n} "
-        f"(radiator/leg BVP did not converge — try lowering pack count): {err}"
+        f"Leg thermal BVP did not converge (n_packs={n}, L={leg_len} m, A={a_cross} m²): "
+        f"check leg geometry/units or lower n_packs: {err}"
     )
 
 
@@ -2139,20 +2222,31 @@ def write_report_pdf(
         fig, ax = plt.subplots(figsize=(8.5, 11))
         ax.axis("off")
         title = param_value(cfg, "meta", "title")
-        ax.text(0.05, 0.98, str(title), fontsize=12, fontweight="bold", va="top")
-        ax.text(
-            0.05,
-            0.93,
+        y = 0.98
+        fig, ax, y = _pdf_draw_wrapped_text_block(
+            pdf, fig, ax, y, str(title), fontsize=11, dy=0.026, wrap_width=58, fontweight="bold"
+        )
+        y -= 0.01
+        fig, ax, y = _pdf_draw_wrapped_text_block(
+            pdf,
+            fig,
+            ax,
+            y,
             "AI-assisted implementation (Cursor cloud agent, directed by Luke via Grok Bot).\n"
             "Cited parameters researched with AI assistance and labeled in config.\n"
             "e* × area drives thermal loss; T_sky/T_ground are secondary.",
             fontsize=7,
-            va="top",
+            dy=0.018,
+            wrap_width=88,
         )
-        y = 0.86
-        input_lines = [
-            f"{row['path']}: {row['value']} [{row['owner']}]" for row in flatten_inputs(cfg)
-        ]
+        y = min(y, 0.86)
+        input_lines = []
+        for row in flatten_inputs(cfg):
+            line = f"{row['path']}: {row['value']} [{row['owner']}]"
+            unused = layout_unused_input_note(cfg, row["path"])
+            if unused:
+                line += f" — {unused}"
+            input_lines.append(line)
         fig, ax, _y = _pdf_draw_plain_lines(
             pdf, fig, ax, y, input_lines, fontsize=5, dy=0.016, family="monospace"
         )
@@ -2162,11 +2256,22 @@ def write_report_pdf(
         fig, ax = plt.subplots(figsize=(8.5, 11))
         ax.axis("off")
         y = 0.98
+        _RESULTS_BLOCK_DY = 0.075
         for block in (_pdf_format_result_block(r) for r in results):
-            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y - 0.06)
-            ax.text(0.05, y, block, fontsize=7, family="monospace", va="top")
-            y -= 0.055
-            y -= 0.02
+            fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
+            y_top = y
+            fig, ax, y = _pdf_draw_wrapped_text_block(
+                pdf,
+                fig,
+                ax,
+                y,
+                block,
+                fontsize=7,
+                dy=0.018,
+                wrap_width=_PDF_BODY_TEXT_WIDTH,
+                family="monospace",
+            )
+            y = y_top - _RESULTS_BLOCK_DY
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -2247,6 +2352,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     coupling_set = rtg_module_enabled(cfg) and param_value(cfg, "rtg", "coupling_fraction") is not None
 
     placeholders = placeholder_list(cfg)
+    layout_notes = layout_unused_input_messages(cfg)
+    if layout_notes:
+        print("\n--- layout (ignored by current layout model) ---")
+        for line in layout_notes:
+            print(f"  • {line}")
     print(format_results_table(results, coupling_set, cfg))
     n_sens = run_n_packs_sensitivity(cfg, specific_energy=param_value(cfg, "battery", "specific_energy_wh_per_kg_high") or 200)
     print(format_n_packs_table(n_sens, cfg))

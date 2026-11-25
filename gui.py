@@ -22,7 +22,7 @@ from gui_logic import (
     run_sizing_report,
     write_sizing_pdf,
 )
-from sizer import ConfigError, DesignInputError
+from sizer import ConfigError, DesignInputError, layout_unused_input_messages
 
 try:
     import tkinter as tk
@@ -487,10 +487,14 @@ class SizerGUI:
 
         blocked, messages = app_gate_blocked(self.base_cfg)
         self._populate_controls_from_cfg(allow_partial=blocked)
+        layout_notes = layout_unused_input_messages(self.base_cfg)
         if blocked:
             self._set_tuning_state(False)
             lines = [f"Loaded: {path.name}", "", "Design incomplete — fix these before tuning or run:\n"]
             lines.extend(f"  • {m}" for m in messages)
+            if layout_notes:
+                lines.append("\nLayout (not used by current model):\n")
+                lines.extend(f"  • {m}" for m in layout_notes)
             lines.append("\nUse “Load EXAMPLE config…” or examples/example_config.yaml for a runnable demo.")
             self._set_results("\n".join(lines))
             self.root.after_idle(self._sync_all_scales)
@@ -499,7 +503,11 @@ class SizerGUI:
 
         self._set_tuning_state(True)
         self._update_run_button_state()
-        self._set_results(f"Loaded: {path.name}\n\nAdjust sliders if needed, then click Run sizing.")
+        lines = [f"Loaded: {path.name}", "", "Adjust sliders if needed, then click Run sizing."]
+        if layout_notes:
+            lines.extend(["", "Layout (not used by current model):"])
+            lines.extend(f"  • {m}" for m in layout_notes)
+        self._set_results("\n".join(lines))
         self.root.after_idle(self._sync_all_scales)
         self.root.after_idle(self._fit_window_to_content)
 

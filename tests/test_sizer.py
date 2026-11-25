@@ -60,10 +60,14 @@ from sizer import (
     total_ring_radiating_area_m2,
     validate_for_run,
     write_report_pdf,
+    _pdf_format_result_block,
     flatten_inputs,
     placeholder_list,
+    layout_unused_input_messages,
+    n_packs_leg_mesh_config_error,
     todo_luke_list,
     figure_text_extents_pdf_scaled,
+    figure_text_extents_px,
     format_n_packs_table,
     SWEEP_PDF_PAGE_LABEL,
     SWEEP_PDF_GLYPH_WIDTH_SCALE,
@@ -462,7 +466,6 @@ LUKE_DESIGN_BLOCKERS = sorted(
     [
         "battery.cell_nominal_voltage_v",
         "battery.packaging_insulation_mass_factor",
-        "geometry.bottom_radiates_to (Whether box bottom sees regolith or lander deck)",
         "geometry.box_height_m",
         "geometry.box_length_m",
         "geometry.box_width_m",
@@ -485,10 +488,10 @@ LUKE_DESIGN_BLOCKERS = sorted(
 )
 
 
-def test_luke_config_has_21_cli_blockers():
+def test_luke_config_has_20_cli_blockers():
     luke = load_config(LUKE_CFG)
     got = sorted(design_blockers(luke))
-    assert len(got) == 21
+    assert len(got) == 20
     assert got == LUKE_DESIGN_BLOCKERS
     with pytest.raises(DesignInputError) as err:
         validate_for_run(luke)
@@ -600,9 +603,95 @@ def test_report_pdf_includes_all_config_paths(example_cfg, tmp_path):
     for path in paths:
         assert path in text, f"missing flatten_inputs path in PDF: {path}"
 
-    for line in placeholder_list(example_cfg):
-        ph_path = line.split(":", 1)[0]
-        assert ph_path in text, f"missing placeholder path in PDF: {ph_path}"
+    blob = " ".join(text.split())
+    for row in flatten_inputs(example_cfg):
+        if row["owner"] != "placeholder":
+            continue
+        words = row["source"].split()
+        probe = " ".join(words[:5]) if len(words) >= 5 else row["source"]
+        assert probe in blob, (
+            f"placeholder bullet source missing (path {row['path']}): probe {probe!r}"
+        )
+
+
+def test_report_pdf_includes_all_result_blocks(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    results = run_all_cases(example_cfg)
+    se = param_value(example_cfg, "battery", "specific_energy_wh_per_kg_high")
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=se, n_list=(1, 2, 4, 8, 16))
+    pdf = tmp_path / "all_results.pdf"
+    write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+    for r in results:
+        block = _pdf_format_result_block(r)
+        assert block.splitlines()[0] in text, block
+        if "BELOW LiPo" in block:
+            assert "BELOW LiPo limit" in text
+
+
+def test_distributed_layout_notes_in_pdf_and_not_blockers(example_cfg, tmp_path):
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    luke = load_config(LUKE_CFG)
+    luke_notes = layout_unused_input_messages(luke)
+    assert any("bottom_radiates_to" in n for n in luke_notes)
+    assert any("ring_radius_m" in n for n in luke_notes)
+    assert len(design_blockers(luke)) == 20
+    results = run_all_cases(example_cfg)
+    pdf = tmp_path / "layout_notes.pdf"
+    write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg))
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+    assert "not used by distributed_packs layout (bottom to ground)" in text
+
+
+@pytest.mark.parametrize(
+    "leg_overrides",
+    [
+        {"leg_length_m": 100.0},
+        {"leg_length_m": 1000.0, "leg_cross_section_m2": 1e-6},
+        {"leg_length_m": 50.0, "leg_cross_section_m2": 1e-7},
+    ],
+)
+def test_leg_bvp_bad_geometry_not_n_packs_mesh_message(example_cfg, leg_overrides):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 8
+    for key, val in leg_overrides.items():
+        cfg["lander_legs"][key]["value"] = val
+    validate_for_run(cfg)
+    with pytest.raises(FinSolverError):
+        run_all_cases(cfg)
+
+
+def test_leg_bvp_bad_geometry_config_error_wording(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 8
+    cfg["lander_legs"]["leg_length_m"]["value"] = 1000.0
+    cfg["lander_legs"]["leg_cross_section_m2"]["value"] = 1e-6
+    validate_for_run(cfg)
+    try:
+        run_all_cases(cfg)
+    except FinSolverError as e:
+        msg = str(n_packs_leg_mesh_config_error(cfg, e))
+        assert "Leg thermal BVP did not converge" in msg
+        assert "n_packs too large for leg thermal mesh" not in msg
+    else:
+        pytest.fail("expected FinSolverError")
+
+
+def test_n_packs_249_still_uses_n_packs_mesh_message(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["geometry"]["n_packs"]["value"] = 249
+    validate_for_run(cfg)
+    try:
+        run_all_cases(cfg)
+    except FinSolverError as e:
+        msg = str(n_packs_leg_mesh_config_error(cfg, e))
+        assert "n_packs too large for leg thermal mesh" in msg
+    else:
+        pytest.fail("expected FinSolverError")
 
 
 def test_n_packs_249_leg_mesh_raises_config_error(example_cfg):
@@ -690,20 +779,23 @@ def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatc
         todo_luke_list(example_cfg),
         n_pack_rows=sens,
     )
+    assert captured_figs, "write_report_pdf did not emit any figures"
     sweep_figs = [f for f in captured_figs if f.get_label() == SWEEP_PDF_PAGE_LABEL]
     assert sweep_figs, "write_report_pdf did not emit an n-packs sweep figure"
     # Agg extents understate PDF width (see sweep_pdf_glyph_width_scale); cap at ~0.91 page width
     # (~1 monospace char slack at 7.5pt/100dpi — tighten if sweep columns are added).
     try:
-        for fig in sweep_figs:
-            w_px, extents = figure_text_extents_pdf_scaled(fig)
+        for fig in captured_figs:
+            if fig.get_label() == SWEEP_PDF_PAGE_LABEL:
+                w_px, extents = figure_text_extents_pdf_scaled(fig)
+            else:
+                w_px, extents = figure_text_extents_px(fig)
             xmin = 0.04 * w_px
             xmax = 0.91 * w_px
             for x0, x1, _ in extents:
                 assert x0 >= xmin - 0.5, f"text left margin too small: x0={x0} min={xmin}"
                 assert x1 <= xmax + 0.5, (
-                    f"text exceeds PDF-adjusted page width: x1={x1} limit={xmax} "
-                    f"(scale={SWEEP_PDF_GLYPH_WIDTH_SCALE})"
+                    f"text exceeds page width: x1={x1} limit={xmax} label={fig.get_label()!r}"
                 )
     finally:
         for fig in captured_figs:
