@@ -106,10 +106,10 @@ battery:
     units: J/kg-K
     source: "Battery pack effective cp for transient check (e.g. ~1000 J/kg-K cited in handbooks)"
     owner: TODO-luke
-  dawn_warm_up_h:
+  lipo_margin_threshold_k:
     value: null
-    units: h
-    source: "Time allowed to warm pack from end-of-night T to charge/hold T after dawn (solar wake-up)"
+    units: K
+    source: "Luke — minimum acceptable LiPo margin at dawn after cold-shutdown coast"
     owner: TODO-luke
 
 thermal_environment:

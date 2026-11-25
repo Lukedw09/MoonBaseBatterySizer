@@ -112,6 +112,11 @@ battery:
     units: Wh/m^3
     source: "EXAMPLE pack-level ~250 kWh/m³ (250000 Wh/m³) — order of advanced Li-ion pack placeholder; Luke to confirm"
     owner: placeholder
+  lipo_margin_threshold_k:
+    value: 10
+    units: K
+    source: "EXAMPLE minimum LiPo margin at dawn cold-shutdown coast (Luke may change)"
+    owner: placeholder
 
 thermal_environment:
   deep_space_sink_k:
