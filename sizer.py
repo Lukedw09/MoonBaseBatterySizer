@@ -939,8 +939,8 @@ def compute_thermal_loss(
         else radiator_night_leak_w(eps_closed, area_deployed, t_box, t_sink, sigma)
     )
     q_stuck_pp = 0.0
-    if radiator_stuck_open and area_deployed > 0:
-        q_stuck_pp = e_rad * sigma * area_deployed * max(0.0, t_rad**4 - t_sink**4)
+    if radiator_stuck_open and _bare > 0:
+        q_stuck_pp = e_rad * sigma * _bare * max(0.0, t_box**4 - t_sink**4)
     passthrough_pp = passthrough / n_packs if n_packs > 0 else passthrough
     q_pp = q_rad_1 + q_leg_surf_1 + passthrough_pp + leak_per_pack + q_stuck_pp
 
@@ -1239,6 +1239,7 @@ class CaseResult:
     system_mass_kg: Optional[float] = None
     break_even_load_w: Optional[float] = None
     louvers_stuck_open_delta_t_k: Optional[float] = None
+    louvers_stuck_below_lipo: Optional[bool] = None
     cold_margin_alert: Optional[bool] = None
 
 
@@ -1255,9 +1256,103 @@ def break_even_load_w(q_thermal_out_w: float, eta_discharge: float) -> float:
     return q_thermal_out_w / denom
 
 
-def lipo_margin_threshold_k(cfg: Dict[str, Any]) -> float:
+def lipo_margin_threshold_k(cfg: Dict[str, Any]) -> Optional[float]:
     t = param_value(cfg, "battery", "lipo_margin_threshold_k")
-    return float(t) if t is not None else 10.0
+    return float(t) if t is not None else None
+
+
+def build_q_loss_stuck_open_lut(
+    cfg: Dict[str, Any],
+    fleet_capacity_wh: float,
+    radiator_deployed_m2_per_pack: float,
+    radiator_bare_m2_per_pack: float,
+    n_points: int = 60,
+) -> Tuple[List[float], List[float]]:
+    import numpy as np
+
+    temps = [float(x) for x in np.linspace(40.0, 290.0, max(5, n_points))]
+    q_vals = [
+        thermal_q_per_pack_stuck_open_radiator(
+            cfg, t, fleet_capacity_wh, radiator_deployed_m2_per_pack, radiator_bare_m2_per_pack
+        )
+        for t in temps
+    ]
+    return temps, q_vals
+
+
+def thermal_q_per_pack_stuck_open_radiator(
+    cfg: Dict[str, Any],
+    t_box_k: float,
+    fleet_capacity_wh: Optional[float],
+    radiator_deployed_m2_per_pack: float,
+    radiator_bare_m2_per_pack: float,
+) -> float:
+    """Per-pack Q_loss with louvers stuck open: box + legs + ε σ A_bare (T⁴ − T_sink⁴)."""
+    th = compute_thermal_loss(
+        cfg,
+        t_box_k=t_box_k,
+        fleet_capacity_wh=fleet_capacity_wh,
+        radiator_operating=True,
+        radiator_deployed_area_m2_per_pack=radiator_deployed_m2_per_pack,
+        q_radiator_reject_per_pack_w=0.0,
+        radiator_stuck_open=False,
+    )
+    e_rad = param_value(cfg, "radiator", "radiator_emissivity")
+    sigma = param_value(cfg, "physics", "stefan_boltzmann_w_per_m2k4") or SIGMA_DEFAULT
+    t_sky = param_value(cfg, "thermal_environment", "deep_space_sink_k")
+    t_ground = param_value(cfg, "thermal_environment", "night_surface_k")
+    f_sky = param_value(cfg, "geometry", "view_factor_sky_vertical") or 0.5
+    f_g = param_value(cfg, "geometry", "view_factor_ground_vertical") or 0.5
+    t_sink = effective_sink_temperature_k(t_sky, t_ground, f_sky, f_g)
+    q_rad_open = e_rad * sigma * radiator_bare_m2_per_pack * max(0.0, t_box_k**4 - t_sink**4)
+    return th.q_per_pack_w + q_rad_open
+
+
+def integrate_louvers_stuck_open_survival(
+    cfg: Dict[str, Any],
+    mass_per_pack_kg: float,
+    cp_j_kgk: float,
+    t_start_k: float,
+    duration_h: float,
+    p_load_fleet_w: float,
+    eta: float,
+    eta_definition: str,
+    fleet_capacity_wh: float,
+    radiator_deployed_m2_per_pack: float,
+    radiator_bare_m2_per_pack: float,
+    *,
+    dt_s: float = 120.0,
+    lipo_limit_k: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Night coast at survival load with open louvers on bare radiator area; T-dependent Q_loss."""
+    n_packs = max(1, int(param_value(cfg, "geometry", "n_packs") or 1))
+    q_int_fleet, _ = pick_internal_heat(internal_waste_heat_w(p_load_fleet_w, eta), eta_definition)
+    mc = mass_per_pack_kg * cp_j_kgk
+    q_lut = build_q_loss_stuck_open_lut(
+        cfg, fleet_capacity_wh, radiator_deployed_m2_per_pack, radiator_bare_m2_per_pack
+    )
+    t = 0.0
+    t_end_s = duration_h * 3600.0
+    temp = t_start_k
+    energy_out_j = 0.0
+    time_to_lipo_h: Optional[float] = None
+    while t < t_end_s - 1e-9:
+        step = min(dt_s, t_end_s - t)
+        q_loss_pp = q_loss_from_lut(temp, q_lut[0], q_lut[1])
+        q_int_pp = q_int_fleet / n_packs
+        q_net_out_pp = q_loss_pp - q_int_pp
+        energy_out_j += q_net_out_pp * n_packs * step
+        temp -= q_net_out_pp * step / mc
+        t += step
+        if lipo_limit_k is not None and time_to_lipo_h is None and temp <= lipo_limit_k:
+            time_to_lipo_h = t / 3600.0
+    return {
+        "t_final_k": temp,
+        "delta_t_k": temp - t_start_k,
+        "time_to_lipo_h": time_to_lipo_h,
+        "margin_lipo_k": (temp - lipo_limit_k) if lipo_limit_k is not None else None,
+        "energy_net_out_kwh": max(0.0, energy_out_j / 3.6e6),
+    }
 
 
 def scaled_geometry_for_separate_pack(
@@ -1426,18 +1521,26 @@ def solve_case(
     dT = lumped_transient_delta_t_k(q_net_no_rtg, mass_for_transient, cp, t_dark)
     dT_stuck: Optional[float] = None
     p_be: Optional[float] = None
+    stuck_below_lipo: Optional[bool] = None
     if primary_case is not None and fallback_branch == "same_pack_survival":
-        th_stuck = compute_thermal_loss(
+        n_stuck = max(1, thermal.n_packs)
+        mass_pp = mass_for_transient / n_stuck
+        stuck = integrate_louvers_stuck_open_survival(
             thermal_cfg,
-            emittance=emittance,
-            k_leg=k_leg,
-            fleet_capacity_wh=cap_wh,
-            radiator_operating=True,
-            radiator_deployed_area_m2_per_pack=primary_case.thermal.radiator_area_per_pack_m2,
-            q_radiator_reject_per_pack_w=0.0,
-            radiator_stuck_open=True,
+            mass_pp,
+            cp,
+            t_box,
+            t_dark,
+            load_w,
+            eta,
+            eta_def,
+            cap_wh,
+            primary_case.thermal.radiator_area_per_pack_m2,
+            primary_case.thermal.radiator_bare_area_per_pack_m2,
+            lipo_limit_k=lipo_lim,
         )
-        dT_stuck = lumped_transient_delta_t_k(th_stuck.q_total_w - q_internal, mass_for_transient, cp, t_dark)
+        dT_stuck = stuck["delta_t_k"]
+        stuck_below_lipo = stuck["margin_lipo_k"] is not None and stuck["margin_lipo_k"] < 0
     if fallback_branch == "primary":
         th_closed = compute_thermal_loss(
             thermal_cfg,
@@ -1490,6 +1593,7 @@ def solve_case(
         system_mass_kg=system_mass,
         break_even_load_w=p_be,
         louvers_stuck_open_delta_t_k=dT_stuck,
+        louvers_stuck_below_lipo=stuck_below_lipo,
     )
 
 
@@ -1579,7 +1683,11 @@ def solve_cold_shutdown_case(
     )
     dT = coast["t_final_k"] - t_box
     margin_thr = lipo_margin_threshold_k(cfg)
-    margin_alert = coast["margin_lipo_k"] is not None and coast["margin_lipo_k"] < margin_thr
+    margin_alert = (
+        coast["margin_lipo_k"] is not None
+        and margin_thr is not None
+        and coast["margin_lipo_k"] < margin_thr
+    )
     note = (
         "Energy from solar wake-up circuit before charge is allowed "
         "(charging blocked below minimum_charge_temperature_k)."
@@ -1780,16 +1888,19 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
             t_hold = param_value(cfg, "battery", "box_target_temperature_k") if cfg else 273.15
             t_fin = t_hold + (r.transient_delta_t_k or 0)
             t_stuck = t_hold + r.louvers_stuck_open_delta_t_k
+            breach = " — BELOW LiPo limit" if r.louvers_stuck_below_lipo else ""
             lines.append(
-                f"  Louvers-stuck-open transient: ΔT ≈ {r.louvers_stuck_open_delta_t_k:.1f} K "
-                f"(hold {t_hold:.1f} K → {t_stuck:.1f} K vs closed louvers → {t_fin:.1f} K)"
+                f"  Louvers-stuck-open transient (integrated, bare A_rad): ΔT ≈ {r.louvers_stuck_open_delta_t_k:.1f} K "
+                f"(hold {t_hold:.1f} K → {t_stuck:.1f} K vs closed louvers → {t_fin:.1f} K){breach}"
             )
         if r.fallback_branch == "cold_shutdown" and r.coast_margin_lipo_k is not None:
-            thr = lipo_margin_threshold_k(cfg) if cfg else 10.0
-            if r.cold_margin_alert:
+            thr = lipo_margin_threshold_k(cfg) if cfg else None
+            if thr is not None and r.cold_margin_alert:
                 lines.append(
                     f"  ALERT: LiPo margin {r.coast_margin_lipo_k:.2f} K < threshold {thr:.1f} K"
                 )
+            if thr is None:
+                lines.append("  LiPo margin threshold unset (TODO-luke) — no margin alert applied")
         if r.transient_warning:
             lines.append(f"  WARNING: {r.transient_warning}")
     lines.append(
@@ -1892,7 +2003,7 @@ def run_n_packs_sensitivity(
                 "warm_fleet_kwh": cs.dawn_warmup_energy_wh / 1000 if cs.dawn_warmup_energy_wh else None,
                 "cold_tf_k": cs.coast_t_final_k,
                 "cold_margin_k": margin_k,
-                "margin_alert": margin_k is not None and margin_k < thr,
+                "margin_alert": margin_k is not None and thr is not None and margin_k < thr,
                 "p_be_w": p_be,
             }
         )
@@ -1908,19 +2019,20 @@ def format_n_packs_table(rows: List[Dict[str, Any]]) -> str:
     ]
     lines.append(
         f"{'n':>3} {'sys/kg':>7} {'Qloss_f':>8} {'Qexc_f':>8} {'Qleak_f':>7} {'Pbe/kW':>7} "
-        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf':>6} {'dLiPo':>6} {'!':>1}"
+        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf':>6} {'dLiPo':>6} {'Warm_f':>7} {'!':>1}"
     )
-    lines.append("(fleet W unless _pp = per pack; ! = margin below threshold)")
+    lines.append("(fleet W/kWh unless _pp = per pack; ! = margin below threshold when set)")
     for row in rows:
         tf = f"{row['cold_tf_k']:.1f}" if row["cold_tf_k"] is not None else "—"
         dm = f"{row['cold_margin_k']:.1f}" if row.get("cold_margin_k") is not None else "—"
+        wk = f"{row['warm_fleet_kwh']:.2f}" if row.get("warm_fleet_kwh") is not None else "—"
         flag = "!" if row.get("margin_alert") else ""
         lines.append(
             f"{row['n_packs']:3d} {row['system_mass_kg']:7.0f} "
             f"{row['q_loss_fleet_w']:8.1f} {row['q_excess_fleet_w']:8.1f} "
             f"{row['q_leak_fleet_w']:7.1f} {row['p_be_w']/1000:7.2f} "
             f"{row['rad_area_pp_m2']:8.3f} {row['rad_mass_pp_kg']:8.2f} "
-            f"{row['panel_pp_m2']:8.2f} {tf:>6} {dm:>6} {flag:>1}"
+            f"{row['panel_pp_m2']:8.2f} {tf:>6} {dm:>6} {wk:>7} {flag:>1}"
         )
     return "\n".join(lines)
 
