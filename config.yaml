@@ -101,6 +101,11 @@ battery:
     units: J/kg-K
     source: "Battery pack effective cp for transient check (e.g. ~1000 J/kg-K cited in handbooks)"
     owner: TODO-luke
+  dawn_warm_up_h:
+    value: null
+    units: h
+    source: "Time allowed to warm pack from end-of-night T to charge/hold T after dawn (solar wake-up)"
+    owner: TODO-luke
 
 thermal_environment:
   deep_space_sink_k:

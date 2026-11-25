@@ -44,6 +44,7 @@ NON_BLOCKING_TODO_PATHS = {
     "battery.capacity_derating_factor_at_0c",
     "battery.minimum_charge_temperature_k",
     "battery.pack_specific_heat_j_per_kgk",
+    "battery.dawn_warm_up_h",
     "thermal_environment.lander_deck_temperature_k",
     "fallback.mode",
     "rtg.thermal_output_w",
@@ -653,9 +654,12 @@ def leg_perimeter_m(cfg: Dict[str, Any]) -> float:
 
 
 def compute_thermal_loss(
-    cfg: Dict[str, Any], emittance: Optional[float] = None, k_leg: Optional[float] = None
+    cfg: Dict[str, Any],
+    emittance: Optional[float] = None,
+    k_leg: Optional[float] = None,
+    t_box_k: Optional[float] = None,
 ) -> ThermalLoss:
-    t_box = param_value(cfg, "battery", "box_target_temperature_k")
+    t_box = t_box_k if t_box_k is not None else param_value(cfg, "battery", "box_target_temperature_k")
     t_sky = param_value(cfg, "thermal_environment", "deep_space_sink_k")
     t_ground = param_value(cfg, "thermal_environment", "night_surface_k")
     t_deck = param_value(cfg, "thermal_environment", "lander_deck_temperature_k")
@@ -769,6 +773,136 @@ def lumped_transient_delta_t_k(
     return -e_out_j / (mass_kg * cp_j_kgk)
 
 
+def thermal_q_loss_at_box_t(cfg: Dict[str, Any], t_box_k: float) -> float:
+    return compute_thermal_loss(cfg, t_box_k=t_box_k).q_total_w
+
+
+def build_q_loss_temperature_lut(
+    cfg: Dict[str, Any], t_min_k: float = 40.0, t_max_k: float = 280.0, n_points: int = 50
+) -> Tuple[List[float], List[float]]:
+    """Precompute Q_loss(T) for fast lumped transient integration."""
+    import numpy as np
+
+    temps = [float(x) for x in np.linspace(t_min_k, t_max_k, max(5, n_points))]
+    q_vals = [thermal_q_loss_at_box_t(cfg, t) for t in temps]
+    return temps, q_vals
+
+
+def q_loss_from_lut(t_k: float, temps: List[float], q_vals: List[float]) -> float:
+    import numpy as np
+
+    return float(np.interp(t_k, temps, q_vals, left=q_vals[0], right=q_vals[-1]))
+
+
+def integrate_lumped_thermal_coast(
+    cfg: Dict[str, Any],
+    mass_kg: float,
+    cp_j_kgk: float,
+    t_start_k: float,
+    duration_h: float,
+    *,
+    p_load_w: float = 0.0,
+    p_heater_w: float = 0.0,
+    eta: float = 0.9,
+    eta_definition: str = "discharge",
+    dt_s: float = 120.0,
+    lipo_limit_k: Optional[float] = None,
+    q_loss_lut: Optional[Tuple[List[float], List[float]]] = None,
+) -> Dict[str, Any]:
+    """Lumped capacitance with Q_loss(T) from thermal model; optional electrical loads."""
+    if mass_kg <= 0 or cp_j_kgk <= 0 or duration_h <= 0:
+        raise ValueError("mass, cp, and duration must be positive")
+    mc = mass_kg * cp_j_kgk
+    q_int_load, _ = pick_internal_heat(internal_waste_heat_w(p_load_w, eta), eta_definition)
+    q_int_heat, _ = pick_internal_heat(internal_waste_heat_w(p_heater_w, eta), eta_definition)
+    t = 0.0
+    t_end_s = duration_h * 3600.0
+    temp = t_start_k
+    energy_out_j = 0.0
+    time_to_lipo_h: Optional[float] = None
+    while t < t_end_s - 1e-9:
+        step = min(dt_s, t_end_s - t)
+        if q_loss_lut is not None:
+            q_loss = q_loss_from_lut(temp, q_loss_lut[0], q_loss_lut[1])
+        else:
+            q_loss = thermal_q_loss_at_box_t(cfg, temp)
+        q_in = q_int_load + q_int_heat + p_heater_w
+        q_net_out = q_loss - q_in
+        energy_out_j += q_net_out * step
+        temp -= q_net_out * step / mc
+        t += step
+        if lipo_limit_k is not None and time_to_lipo_h is None and temp <= lipo_limit_k:
+            time_to_lipo_h = t / 3600.0
+    return {
+        "t_final_k": temp,
+        "time_to_lipo_h": time_to_lipo_h,
+        "margin_lipo_k": (temp - lipo_limit_k) if lipo_limit_k is not None else None,
+        "energy_net_out_kwh": max(0.0, energy_out_j / 3.6e6),
+    }
+
+
+def solve_dawn_warmup_heater_w(
+    cfg: Dict[str, Any],
+    mass_kg: float,
+    cp_j_kgk: float,
+    t_start_k: float,
+    t_target_k: float,
+    warm_up_h: float,
+    eta: float,
+    eta_definition: str,
+    dt_s: float = 120.0,
+    q_loss_lut: Optional[Tuple[List[float], List[float]]] = None,
+) -> Dict[str, float]:
+    """Bisection on resistive heater power to reach t_target within warm_up_h."""
+    if warm_up_h <= 0 or t_target_k <= t_start_k:
+        return {"p_heater_w": 0.0, "energy_wh": 0.0}
+
+    def temp_at_end(p_h: float) -> float:
+        coast = integrate_lumped_thermal_coast(
+            cfg,
+            mass_kg,
+            cp_j_kgk,
+            t_start_k,
+            warm_up_h,
+            p_heater_w=p_h,
+            eta=eta,
+            eta_definition=eta_definition,
+            dt_s=dt_s,
+            q_loss_lut=q_loss_lut,
+        )
+        return coast["t_final_k"]
+
+    lo, hi = 0.0, max(500.0, thermal_q_loss_at_box_t(cfg, t_start_k) * 3.0)
+    for _ in range(8):
+        if temp_at_end(hi) >= t_target_k:
+            break
+        hi *= 2.0
+    else:
+        raise ConfigError("dawn warm-up: could not bracket heater power — extend warm_up_h or check inputs")
+    p_solve = hi
+    for _ in range(32):
+        mid = 0.5 * (lo + hi)
+        if temp_at_end(mid) >= t_target_k:
+            hi = mid
+            p_solve = mid
+        else:
+            lo = mid
+    coast = integrate_lumped_thermal_coast(
+        cfg,
+        mass_kg,
+        cp_j_kgk,
+        t_start_k,
+        warm_up_h,
+        p_heater_w=p_solve,
+        eta=eta,
+        eta_definition=eta_definition,
+        dt_s=dt_s,
+        q_loss_lut=q_loss_lut,
+    )
+    e_heater_wh = p_solve * warm_up_h
+    return {"p_heater_w": p_solve, "energy_wh": e_heater_wh, "t_final_k": coast["t_final_k"]}
+
+
 @dataclass
 class CaseResult:
     load_name: str
@@ -790,6 +924,14 @@ class CaseResult:
     transient_below_lipo: Optional[bool]
     transient_warning: Optional[str]
     radiative_coupling_info: Optional[float]
+    coast_t_final_k: Optional[float] = None
+    coast_time_to_lipo_h: Optional[float] = None
+    coast_margin_lipo_k: Optional[float] = None
+    coast_energy_out_kwh: Optional[float] = None
+    dawn_warmup_target_k: Optional[float] = None
+    dawn_warmup_p_heater_w: Optional[float] = None
+    dawn_warmup_energy_wh: Optional[float] = None
+    dawn_warmup_note: Optional[str] = None
 
 
 def scaled_geometry_for_separate_pack(
@@ -950,6 +1092,106 @@ def solve_case(
     )
 
 
+def solve_cold_shutdown_case(
+    cfg: Dict[str, Any],
+    primary: CaseResult,
+    *,
+    dt_s: float = 120.0,
+) -> CaseResult:
+    """Zero load backup: coast through night with Q_loss(T), then dawn warm-up heater estimate."""
+    validate_for_run(cfg)
+    t_dark = param_value(cfg, "night", "t_dark_h")
+    eta = battery_efficiency_value(cfg)
+    eta_def = param_value(cfg, "battery", "eta_definition")
+    cp = param_value(cfg, "battery", "pack_specific_heat_j_per_kgk")
+    lipo_lim = param_value(cfg, "battery", "lipo_cold_limit_k")
+    t_box = param_value(cfg, "battery", "box_target_temperature_k")
+    t_min_charge = param_value(cfg, "battery", "minimum_charge_temperature_k")
+    warm_h = param_value(cfg, "battery", "dawn_warm_up_h")
+    if cp is None or cp <= 0:
+        raise ConfigError("cold_shutdown transient requires battery.pack_specific_heat_j_per_kgk")
+    if warm_h is None or warm_h <= 0:
+        raise ConfigError("dawn warm-up requires battery.dawn_warm_up_h")
+
+    mass = primary.battery.mass_kg
+    lut = build_q_loss_temperature_lut(cfg, t_min_k=min(lipo_lim or 40, t_box) - 10, t_max_k=t_box + 5)
+    coast = integrate_lumped_thermal_coast(
+        cfg,
+        mass,
+        cp,
+        t_box,
+        t_dark,
+        p_load_w=0.0,
+        eta=eta,
+        eta_definition=eta_def,
+        dt_s=dt_s,
+        lipo_limit_k=lipo_lim,
+        q_loss_lut=lut,
+    )
+    t_final = coast["t_final_k"]
+    warmup_target = max(t_box, t_min_charge) if t_min_charge is not None else t_box
+    warmup = solve_dawn_warmup_heater_w(
+        cfg, mass, cp, t_final, warmup_target, warm_h, eta, eta_def, dt_s=dt_s, q_loss_lut=lut
+    )
+
+    thermal_hold = compute_thermal_loss(cfg)
+    q_int_map = internal_waste_heat_w(0.0, eta)
+    q_internal, q_note = pick_internal_heat(q_int_map, eta_def)
+    battery = primary.battery
+    battery = BatterySizing(
+        p_load_w=0.0,
+        p_heater_w=0.0,
+        t_dark_h=t_dark,
+        dod=battery.dod,
+        eta_discharge=battery.eta_discharge,
+        specific_energy_wh_kg=battery.specific_energy_wh_kg,
+        packaging_factor=battery.packaging_factor,
+        e_night_wh=0.0,
+        capacity_wh=battery.capacity_wh,
+        mass_kg=mass,
+        n_series=battery.n_series,
+        n_parallel=battery.n_parallel,
+        energy_per_string_wh=battery.energy_per_string_wh,
+        bus_v=battery.bus_v,
+        cell_v=battery.cell_v,
+        cell_ah=battery.cell_ah,
+    )
+    dT = coast["t_final_k"] - t_box
+    note = (
+        "Energy from solar wake-up circuit before charge is allowed "
+        "(charging blocked below minimum_charge_temperature_k)."
+    )
+    return CaseResult(
+        load_name="cold_shutdown_0W",
+        load_w=0.0,
+        specific_energy_wh_kg=primary.specific_energy_wh_kg,
+        fallback_branch="cold_shutdown",
+        battery=battery,
+        thermal=thermal_hold,
+        q_internal_w=q_internal,
+        q_internal_note=q_note,
+        q_internal_both=q_int_map,
+        q_excess_w=0.0,
+        q_rtg_total_w=0.0,
+        q_rtg_message="design uses 5 kW primary — RTG thermal not required (backup case only)",
+        q_rtg_per_unit_w={},
+        mode=param_value(cfg, "meta", "mode") or "solve_rtg",
+        iterations=1,
+        transient_delta_t_k=dT,
+        transient_below_lipo=coast["margin_lipo_k"] is not None and coast["margin_lipo_k"] < 0,
+        transient_warning=None,
+        radiative_coupling_info=primary.radiative_coupling_info,
+        coast_t_final_k=coast["t_final_k"],
+        coast_time_to_lipo_h=coast["time_to_lipo_h"],
+        coast_margin_lipo_k=coast["margin_lipo_k"],
+        coast_energy_out_kwh=coast["energy_net_out_kwh"],
+        dawn_warmup_target_k=warmup_target,
+        dawn_warmup_p_heater_w=warmup["p_heater_w"],
+        dawn_warmup_energy_wh=warmup["energy_wh"],
+        dawn_warmup_note=note,
+    )
+
+
 def todo_luke_list(cfg: Dict[str, Any]) -> List[str]:
     rows = []
     for row in flatten_inputs(cfg):
@@ -959,15 +1201,38 @@ def todo_luke_list(cfg: Dict[str, Any]) -> List[str]:
     return rows
 
 
+def pack_efficiency_from_case(r: CaseResult) -> float:
+    b = r.battery
+    if b.p_load_w > 0 and r.q_internal_w >= 0:
+        return b.p_load_w / (b.p_load_w + r.q_internal_w)
+    return b.eta_discharge
+
+
+def _internal_waste_key(eta_definition: str) -> str:
+    return "discharge_definition" if eta_definition == "discharge" else "round_trip_definition"
+
+
 def electric_heater_alternative(r: CaseResult) -> Optional[Dict[str, float]]:
-    """Steady electric heat to cover thermal shortfall instead of RTG thermal delivery."""
-    p_short = max(0.0, r.thermal.q_total_w - r.q_internal_w)
-    if p_short <= 0:
+    """Steady resistive heat (includes battery discharge loss on heater current)."""
+    gap = r.thermal.q_total_w - r.q_internal_w
+    if gap <= 0:
         return None
-    e_heater_wh = p_short * r.battery.t_dark_h
+    eta = pack_efficiency_from_case(r)
+    wkey = _internal_waste_key(r.q_internal_note)
+    p_heater = gap * eta
+    q_int_h = internal_waste_heat_w(p_heater, eta)[wkey]
+    for _ in range(8):
+        p_new = max(0.0, (r.thermal.q_total_w - r.q_internal_w - q_int_h) * eta)
+        q_int_h = internal_waste_heat_w(p_new, eta)[wkey]
+        if abs(p_new - p_heater) < 1e-2:
+            p_heater = p_new
+            break
+        p_heater = p_new
+    e_heater_wh = p_heater * r.battery.t_dark_h
     capacity_extra_wh = e_heater_wh / (r.battery.dod * r.battery.eta_discharge)
     return {
-        "p_shortfall_w": p_short,
+        "p_shortfall_w": p_heater,
+        "q_internal_from_heater_w": q_int_h,
         "e_heater_wh": e_heater_wh,
         "capacity_extra_wh": capacity_extra_wh,
     }
@@ -984,7 +1249,7 @@ def format_electric_heater_alt_line(r: CaseResult) -> Optional[str]:
         f"  Electric-heater alt (vs RTG thermal): P_heat={alt['p_shortfall_w']:.1f} W steady → "
         f"{alt['e_heater_wh']/1000:.3f} kWh over {b.t_dark_h:.0f} h; "
         f"+{alt['capacity_extra_wh']/1000:.3f} kWh capacity increment "
-        f"(DoD={b.dod}, η_dis={b.eta_discharge:.3f})"
+        f"(DoD={b.dod}, η_dis={b.eta_discharge:.3f}; includes heater discharge loss)"
     )
 
 
@@ -996,7 +1261,7 @@ def placeholder_list(cfg: Dict[str, Any]) -> List[str]:
     return rows
 
 
-def format_results_table(results: List[CaseResult], coupling_set: bool) -> str:
+def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Optional[Dict[str, Any]] = None) -> str:
     lines = ["", "=" * 100, "LUNAR BASE BATTERY + RTG THERMAL SIZER", "=" * 100]
     if not coupling_set:
         lines.append("NOTE: rtg.coupling_fraction unset — RTG totals omitted; Q_loss only.")
@@ -1025,7 +1290,14 @@ def format_results_table(results: List[CaseResult], coupling_set: bool) -> str:
             f"  Q_loss @ Hayne depth k = {r.thermal.q_total_at_depth_k_w:.1f} W "
             f"(legs {r.thermal.q_leg_at_depth_k_w:.1f} W)"
         )
-        if r.q_excess_w > 0:
+        if r.load_name == "primary_5000W" and r.q_excess_w > 0:
+            e_reject_kwh = r.q_excess_w * r.battery.t_dark_h / 1000.0
+            d_t = r.transient_delta_t_k if r.transient_delta_t_k is not None else 0.0
+            lines.append(
+                f"  Excess heat to reject (cooling): {r.q_excess_w:.1f} W; {e_reject_kwh:.2f} kWh over "
+                f"{r.battery.t_dark_h:.0f} h night; lumped ΔT at hold ≈ {d_t:.1f} K (RTG thermal not in 5 kW design)"
+            )
+        elif r.q_excess_w > 0:
             lines.append(f"  Q_excess      = {r.q_excess_w:.1f} W (overheat risk — internal > loss)")
         if r.q_rtg_total_w is not None:
             lines.append(f"  Q_RTG total   = {r.q_rtg_total_w:.1f} W — {r.q_rtg_message}")
@@ -1040,6 +1312,23 @@ def format_results_table(results: List[CaseResult], coupling_set: bool) -> str:
         alt_line = format_electric_heater_alt_line(r)
         if alt_line:
             lines.append(alt_line)
+        if r.fallback_branch == "cold_shutdown" and r.coast_t_final_k is not None:
+            t0 = r.coast_t_final_k - (r.transient_delta_t_k or 0.0)
+            lines.append(
+                f"  Cold shutdown coast: {t0:.2f} K → {r.coast_t_final_k:.2f} K over {r.battery.t_dark_h:.0f} h; "
+                f"energy out ≈ {r.coast_energy_out_kwh:.2f} kWh"
+            )
+            if r.coast_time_to_lipo_h is not None:
+                lines.append(f"  Time to LiPo limit: {r.coast_time_to_lipo_h:.2f} h")
+            elif r.coast_margin_lipo_k is not None:
+                lines.append(f"  LiPo margin at dawn: {r.coast_margin_lipo_k:.2f} K")
+            if r.dawn_warmup_p_heater_w is not None and r.dawn_warmup_target_k is not None:
+                lines.append(
+                    f"  Dawn warm-up → {r.dawn_warmup_target_k:.1f} K: "
+                    f"P_heater≈{r.dawn_warmup_p_heater_w:.1f} W, E≈{r.dawn_warmup_energy_wh/1000:.2f} kWh"
+                )
+                if r.dawn_warmup_note:
+                    lines.append(f"  {r.dawn_warmup_note}")
         if r.transient_warning:
             lines.append(f"  WARNING: {r.transient_warning}")
     lines.append(
@@ -1090,6 +1379,13 @@ def run_all_cases(cfg: Dict[str, Any]) -> List[CaseResult]:
                         transient_mass_kg=prim.mass_kg if br == "same_pack_survival" else None,
                     )
                 )
+
+    for se in (se_low, se_high):
+        if se in primary_by_se:
+            try:
+                results.append(solve_cold_shutdown_case(cfg, primary_by_se[se]))
+            except (ConfigError, ValueError):
+                pass
     return results
 
 
@@ -1165,6 +1461,10 @@ def write_report_pdf(
                 block += f" EXCESS={r.q_excess_w:.0f}W"
             if r.transient_delta_t_k is not None:
                 block += f" dT={r.transient_delta_t_k:.1f}K"
+            if r.fallback_branch == "cold_shutdown" and r.coast_t_final_k is not None:
+                block += f" Tf={r.coast_t_final_k:.1f}K"
+            if r.dawn_warmup_energy_wh:
+                block += f" warm={r.dawn_warmup_energy_wh/1000:.1f}kWh"
             ax.text(0.05, y, block, fontsize=7, family="monospace", va="top")
             y -= 0.055
             alt_line = format_electric_heater_alt_line(r)
@@ -1221,7 +1521,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     coupling_set = param_value(cfg, "rtg", "coupling_fraction") is not None
 
     placeholders = placeholder_list(cfg)
-    print(format_results_table(results, coupling_set))
+    print(format_results_table(results, coupling_set, cfg))
     if placeholders:
         print("\n--- placeholder (example values, not Luke's design) ---")
         for t in placeholders:

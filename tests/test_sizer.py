@@ -36,7 +36,11 @@ from sizer import (
     radiation_loss_w,
     regolith_spreading_resistance_k_per_w,
     run_all_cases,
+    build_q_loss_temperature_lut,
+    integrate_lumped_thermal_coast,
     solve_case,
+    solve_cold_shutdown_case,
+    solve_dawn_warmup_heater_w,
     solve_linear_h_fin_bvp,
     solve_radiating_leg_fin,
     total_ring_radiating_area_m2,
@@ -379,3 +383,44 @@ def test_battery_efficiency_missing_raises():
     del cfg["battery"]["efficiency"]
     with pytest.raises(ConfigError, match="efficiency"):
         solve_case("primary_5000W", 5000, 200, cfg, fallback_branch="primary")
+
+
+def test_cold_shutdown_final_t_on_example(example_cfg):
+    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    fine_lut = build_q_loss_temperature_lut(example_cfg, t_min_k=220, t_max_k=275, n_points=120)
+    fine = integrate_lumped_thermal_coast(
+        example_cfg,
+        prim.battery.mass_kg,
+        param_value(example_cfg, "battery", "pack_specific_heat_j_per_kgk"),
+        param_value(example_cfg, "battery", "box_target_temperature_k"),
+        param_value(example_cfg, "night", "t_dark_h"),
+        p_load_w=0.0,
+        eta=0.9,
+        eta_definition="discharge",
+        dt_s=30.0,
+        lipo_limit_k=233.0,
+        q_loss_lut=fine_lut,
+    )
+    assert fine["t_final_k"] == pytest.approx(254.20, rel=0.002)
+    cs = solve_cold_shutdown_case(example_cfg, prim, dt_s=60.0)
+    assert cs.coast_t_final_k == pytest.approx(fine["t_final_k"], rel=0.005)
+    assert cs.coast_margin_lipo_k == pytest.approx(fine["margin_lipo_k"], rel=0.01)
+    assert cs.coast_time_to_lipo_h is None
+
+
+def test_dawn_warmup_energy_hand_calc(example_cfg):
+    mass = 2500.0
+    cp = 1000.0
+    eta = 0.9
+    t0, t_target = 254.2, 273.15
+    tau_h = 6.0
+    q0 = 100.0
+    lut = ([200.0, 280.0], [q0, q0])
+    mc = mass * cp
+    d_t = t_target - t0
+    p_hand = (mc * d_t / (tau_h * 3600.0) + q0) * eta
+    w = solve_dawn_warmup_heater_w(
+        example_cfg, mass, cp, t0, t_target, tau_h, eta, "discharge", dt_s=60.0, q_loss_lut=lut
+    )
+    assert w["p_heater_w"] == pytest.approx(p_hand, rel=0.02)
+    assert w["energy_wh"] == pytest.approx(p_hand * tau_h, rel=0.02)

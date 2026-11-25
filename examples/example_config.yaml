@@ -100,6 +100,11 @@ battery:
     units: J/kg-K
     source: "EXAMPLE pack effective cp — not from Luke's data"
     owner: placeholder
+  dawn_warm_up_h:
+    value: 6
+    units: h
+    source: "EXAMPLE placeholder — time to restore box/charge temperature after night (Luke to confirm)"
+    owner: placeholder
 
 thermal_environment:
   deep_space_sink_k:
