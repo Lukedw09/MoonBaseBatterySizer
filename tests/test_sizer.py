@@ -30,6 +30,7 @@ from sizer import (
     solve_dawn_warmup_solar_w,
     electric_heater_alternative,
     design_blockers,
+    thermal_q_loss_at_box_t,
     break_even_load_w,
     discharge_efficiency_for_sizing,
     battery_efficiency_value,
@@ -336,7 +337,10 @@ def test_example_same_pack_survival_transient_dt(example_cfg):
         primary_case=prim,
         transient_mass_kg=prim.battery.mass_kg,
     )
-    assert surv.transient_delta_t_k == pytest.approx(-31.641374079109113, rel=0.001)
+    mass_pp = prim.battery.mass_kg / max(1, prim.thermal.n_packs)
+    assert mass_pp == pytest.approx(312.5, rel=1e-6)
+    assert surv.transient_delta_t_k == pytest.approx(-26.6, abs=0.15)
+    assert 273.15 + surv.transient_delta_t_k == pytest.approx(246.6, abs=0.15)
 
 
 def test_lander_deck_missing_temperature_raises_ring_layout(example_cfg):
@@ -452,12 +456,17 @@ def test_cold_shutdown_final_t_on_example(example_cfg):
     cp = param_value(example_cfg, "battery", "pack_specific_heat_j_per_kgk")
     t_dark = param_value(example_cfg, "night", "t_dark_h")
     q_ex_pp = prim.q_excess_w / n_p
-    q_const = 39.537641346624724
     t0 = param_value(example_cfg, "battery", "box_target_temperature_k")
-    t_analytic = t0 - q_const * t_dark * 3600.0 / (mass_pp * cp)
+    q_pp_hold = thermal_q_loss_at_box_t(
+        example_cfg, t0, fleet_capacity_wh=500_000.0, q_excess_per_pack_w=q_ex_pp
+    )
+    t_const_loss = t0 - q_pp_hold * t_dark * 3600.0 / (mass_pp * cp)
     cs = solve_cold_shutdown_case(example_cfg, prim, dt_s=60.0)
-    assert cs.coast_t_final_k == pytest.approx(t_analytic, rel=0.03)
-    assert cs.coast_t_final_k >= t_analytic
+    assert mass_pp == pytest.approx(312.5, rel=1e-6)
+    assert q_pp_hold == pytest.approx(39.536764659419745, rel=0.001)
+    assert t_const_loss == pytest.approx(240.35662592089085, rel=0.001)
+    assert cs.coast_t_final_k == pytest.approx(245.57321183820113, rel=0.001)
+    assert cs.coast_t_final_k > t_const_loss
     assert cs.coast_margin_lipo_k == pytest.approx(cs.coast_t_final_k - 233.0, rel=0.01)
     assert cs.coast_time_to_lipo_h is None
 
@@ -498,14 +507,42 @@ def test_electric_heater_alt_hand_calc(example_cfg):
     assert alt["e_heater_wh"] == pytest.approx(p_exp * 72, rel=0.001)
 
 
-def test_design_gate_app_cli_blockers_equal():
-    ex = load_config(EXAMPLE)
+LUKE_DESIGN_BLOCKERS = sorted(
+    [
+        "battery.cell_nominal_voltage_v",
+        "battery.pack_volumetric_energy_density_wh_per_m3",
+        "battery.packaging_insulation_mass_factor",
+        "geometry.bottom_radiates_to (Whether box bottom sees regolith or lander deck)",
+        "geometry.box_height_m",
+        "geometry.box_length_m",
+        "geometry.box_width_m",
+        "geometry.n_packs",
+        "lander_legs.footpad_area_m2",
+        "lander_legs.leg_cross_section_m2",
+        "lander_legs.leg_length_m",
+        "lander_legs.leg_perimeter_m",
+        "lander_legs.leg_surface_emissivity",
+        "losses.passthrough_w",
+        "radiator.louver_area_multiplier",
+        "radiator.radiator_areal_mass_kg_per_m2",
+        "radiator.radiator_closed_emissivity",
+        "radiator.radiator_emissivity",
+        "radiator.radiator_temperature_k",
+        "wake_up.panel_areal_mass_kg_per_m2",
+        "wake_up.panel_efficiency",
+        "wake_up.sun_incidence_cosine",
+    ]
+)
+
+
+def test_luke_config_has_22_cli_blockers():
     luke = load_config(LUKE_CFG)
-    assert design_blockers(ex) == []
-    validate_for_run(ex)
+    got = sorted(design_blockers(luke))
+    assert len(got) == 22
+    assert got == LUKE_DESIGN_BLOCKERS
     with pytest.raises(DesignInputError) as err:
         validate_for_run(luke)
-    assert sorted(design_blockers(luke)) == sorted(err.value.missing)
+    assert sorted(err.value.missing) == LUKE_DESIGN_BLOCKERS
 
 
 def test_survival_carries_primary_radiator_leak_n8(example_cfg):
@@ -540,8 +577,10 @@ def test_cold_margin_alert_at_n16(example_cfg):
     cfg["geometry"]["n_packs"]["value"] = 16
     prim = solve_case("primary_5000W", 5000, 200, cfg, fallback_branch="primary")
     cs = solve_cold_shutdown_case(cfg, prim)
-    assert cs.coast_margin_lipo_k == pytest.approx(cs.coast_t_final_k - 233.0, rel=0.001)
+    assert cs.coast_margin_lipo_k == pytest.approx(0.238, abs=0.001)
     assert cs.cold_margin_alert is True
+    warm = run_n_packs_sensitivity(cfg, specific_energy=200, n_list=(16,))[0]
+    assert warm["warm_fleet_kwh"] == pytest.approx(30.07, rel=0.001)
 
 
 def test_louvers_stuck_open_delta_n8(example_cfg):
@@ -553,29 +592,37 @@ def test_louvers_stuck_open_delta_n8(example_cfg):
         primary_case=prim,
         transient_mass_kg=prim.battery.mass_kg,
     )
-    mass_pp = 2500.0 / 8
-    cp = 1000.0
-    eta = 0.9
-    q_int_pp = (100.0 * (1.0 / eta - 1.0)) / 8
-    bare = 0.11613841146546709
-    e_rad = 0.92
-    sigma = SIGMA_DEFAULT
-    t_sink = effective_sink_temperature_k(3.0, 40.0)
-    t0 = 273.15
+    mass_pp = prim.battery.mass_kg / max(1, prim.thermal.n_packs)
+    q_int_fleet = 100.0 * (1.0 / 0.9 - 1.0)
+    q_int_pp = q_int_fleet / 8
     assert mass_pp == pytest.approx(312.5, rel=1e-6)
-    assert q_int_pp == pytest.approx(11.111111111111116 / 8, rel=1e-6)
+    assert q_int_pp == pytest.approx(q_int_fleet / 8, rel=1e-9)
+    assert surv.transient_delta_t_k == pytest.approx(-26.6, abs=0.15)
     assert surv.louvers_stuck_open_delta_t_k == pytest.approx(-41.6, abs=0.15)
+    assert surv.louvers_stuck_open_delta_t_k < surv.transient_delta_t_k
     assert 273.15 + surv.louvers_stuck_open_delta_t_k == pytest.approx(231.6, abs=0.15)
     assert surv.louvers_stuck_below_lipo is True
 
 
 def test_streamlit_app_gate_smoke():
-    pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
 
-    app_path = Path(__file__).resolve().parent.parent / "app.py"
-    example = Path(__file__).resolve().parent.parent / "examples" / "example_config.yaml"
+    root = Path(__file__).resolve().parent.parent
+    app_path = root / "app.py"
+    luke = root / "config.yaml"
+    example = root / "examples" / "example_config.yaml"
+    at = AppTest.from_file(str(app_path))
+    at.run(timeout=15)
+    at.sidebar.text_input[0].set_value(str(luke)).run(timeout=15)
+    assert not at.exception
+    blocker_lines = [m.value for m in at.markdown if m.value.startswith("- `")]
+    assert len(blocker_lines) == 22
+
     at = AppTest.from_file(str(app_path))
     at.run(timeout=15)
     at.sidebar.text_input[0].set_value(str(example)).run(timeout=15)
+    run_btn = next(b for b in at.sidebar.button if "Run sizing" in b.label)
+    run_btn.click().run(timeout=120)
     assert not at.exception
+    assert at.text
+    assert "primary_5000W" in at.text[0].value

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any
 
 import streamlit as st
 
@@ -25,24 +25,6 @@ from sizer import (
 
 EXAMPLE = Path(__file__).resolve().parent / "examples" / "example_config.yaml"
 
-SIDEBAR_FIELDS: Tuple[Tuple[str, ...], str] = (
-    (("geometry", "n_packs"), "n_packs"),
-    (("loads", "primary_w"), "Night load (W)"),
-    (("night", "t_dark_h"), "Night hours"),
-    (("battery", "specific_energy_wh_per_kg_low"), "Specific energy low (Wh/kg)"),
-    (("battery", "specific_energy_wh_per_kg_high"), "Specific energy high (Wh/kg)"),
-    (("battery", "pack_volumetric_energy_density_wh_per_m3"), "Pack volumetric density (Wh/m³)"),
-    (("battery", "depth_of_discharge"), "Depth of discharge"),
-    (("battery", "efficiency"), "Discharge η"),
-    (("battery", "packaging_insulation_mass_factor"), "Packaging factor"),
-    (("battery", "box_target_temperature_k"), "T_box (K)"),
-    (("radiator", "radiator_temperature_k"), "T_rad (K)"),
-    (("radiator", "radiator_emissivity"), "Radiator ε"),
-    (("wake_up", "warm_up_h"), "Warm-up h"),
-    (("wake_up", "panel_efficiency"), "Panel η"),
-    (("wake_up", "sun_incidence_cosine"), "cos(incidence)"),
-)
-
 
 def leaf_owner(cfg: dict, *keys: str) -> str:
     node = cfg
@@ -51,6 +33,16 @@ def leaf_owner(cfg: dict, *keys: str) -> str:
     if isinstance(node, dict):
         return str(node.get("owner") or "")
     return ""
+
+
+def effective_owner_label(base_cfg: dict, *keys: str, current_value: Any) -> str:
+    base_val = param_value(base_cfg, *keys)
+    prior = leaf_owner(base_cfg, *keys) or "unknown"
+    if base_val is not None and current_value == base_val:
+        return prior
+    if prior.startswith("ui-override"):
+        return prior
+    return f"ui-override (was {prior})"
 
 
 def apply_if_changed(base_cfg: dict, cfg: dict, *keys: str, new_value: Any) -> None:
@@ -69,8 +61,8 @@ def apply_if_changed(base_cfg: dict, cfg: dict, *keys: str, new_value: Any) -> N
     leaf["owner"] = f"ui-override (was {prior})" if prior != "ui-override" else "ui-override"
 
 
-def owner_caption(base_cfg: dict, *keys: str) -> None:
-    st.sidebar.caption(f"owner: {leaf_owner(base_cfg, *keys)}")
+def owner_caption(base_cfg: dict, *keys: str, current_value: Any) -> None:
+    st.sidebar.caption(f"owner: {effective_owner_label(base_cfg, *keys, current_value=current_value)}")
 
 
 def require_param(cfg: dict, *keys: str, label: str):
@@ -122,36 +114,36 @@ def main() -> None:
     se_low = float(require_param(base_cfg, "battery", "specific_energy_wh_per_kg_low", label="Wh/kg low"))
     se_high = float(require_param(base_cfg, "battery", "specific_energy_wh_per_kg_high", label="Wh/kg high"))
 
-    owner_caption(base_cfg, "geometry", "n_packs")
     n_packs = st.sidebar.slider("n_packs", 1, 16, n_packs)
-    owner_caption(base_cfg, "loads", "primary_w")
+    owner_caption(base_cfg, "geometry", "n_packs", current_value=n_packs)
     primary_w = st.sidebar.number_input("Night load (W)", 0.0, 20000.0, float(param_value(cfg, "loads", "primary_w")))
-    owner_caption(base_cfg, "night", "t_dark_h")
+    owner_caption(base_cfg, "loads", "primary_w", current_value=primary_w)
     t_dark = st.sidebar.number_input("Night hours", 1.0, 240.0, float(param_value(cfg, "night", "t_dark_h")))
-    owner_caption(base_cfg, "battery", "specific_energy_wh_per_kg_low")
+    owner_caption(base_cfg, "night", "t_dark_h", current_value=t_dark)
     se_low = st.sidebar.number_input("Specific energy low (Wh/kg)", 50.0, 400.0, se_low)
-    owner_caption(base_cfg, "battery", "specific_energy_wh_per_kg_high")
+    owner_caption(base_cfg, "battery", "specific_energy_wh_per_kg_low", current_value=se_low)
     se_high = st.sidebar.number_input("Specific energy high (Wh/kg)", 50.0, 400.0, se_high)
-    owner_caption(base_cfg, "battery", "pack_volumetric_energy_density_wh_per_m3")
+    owner_caption(base_cfg, "battery", "specific_energy_wh_per_kg_high", current_value=se_high)
     rho = st.sidebar.number_input("Pack volumetric density (Wh/m³)", 50000.0, 500000.0, rho)
-    owner_caption(base_cfg, "battery", "depth_of_discharge")
+    owner_caption(base_cfg, "battery", "pack_volumetric_energy_density_wh_per_m3", current_value=rho)
     dod = st.sidebar.slider("Depth of discharge", 0.1, 1.0, float(param_value(cfg, "battery", "depth_of_discharge")))
-    owner_caption(base_cfg, "battery", "efficiency")
+    owner_caption(base_cfg, "battery", "depth_of_discharge", current_value=dod)
     eta = st.sidebar.slider("Discharge η", 0.5, 1.0, float(param_value(cfg, "battery", "efficiency")))
-    owner_caption(base_cfg, "battery", "packaging_insulation_mass_factor")
+    owner_caption(base_cfg, "battery", "efficiency", current_value=eta)
     packaging = st.sidebar.number_input("Packaging factor", 0.5, 3.0, packaging)
-    owner_caption(base_cfg, "battery", "box_target_temperature_k")
+    owner_caption(base_cfg, "battery", "packaging_insulation_mass_factor", current_value=packaging)
     t_box = st.sidebar.number_input("T_box (K)", 200.0, 310.0, t_box)
-    owner_caption(base_cfg, "radiator", "radiator_temperature_k")
+    owner_caption(base_cfg, "battery", "box_target_temperature_k", current_value=t_box)
     t_rad = st.sidebar.number_input("T_rad (K)", 200.0, t_box, min(t_rad, t_box))
-    owner_caption(base_cfg, "radiator", "radiator_emissivity")
+    owner_caption(base_cfg, "radiator", "radiator_temperature_k", current_value=t_rad)
     e_rad = st.sidebar.number_input("Radiator ε", 0.05, 1.0, e_rad)
-    owner_caption(base_cfg, "wake_up", "warm_up_h")
+    owner_caption(base_cfg, "radiator", "radiator_emissivity", current_value=e_rad)
     warm_h = st.sidebar.number_input("Warm-up h", 0.5, 24.0, float(param_value(cfg, "wake_up", "warm_up_h")))
-    owner_caption(base_cfg, "wake_up", "panel_efficiency")
+    owner_caption(base_cfg, "wake_up", "warm_up_h", current_value=warm_h)
     panel_eta = st.sidebar.slider("Panel η", 0.05, 0.45, panel_eta)
-    owner_caption(base_cfg, "wake_up", "sun_incidence_cosine")
+    owner_caption(base_cfg, "wake_up", "panel_efficiency", current_value=panel_eta)
     cos_i = st.sidebar.slider("cos(incidence)", 0.05, 1.0, cos_i)
+    owner_caption(base_cfg, "wake_up", "sun_incidence_cosine", current_value=cos_i)
 
     values = {
         ("geometry", "n_packs"): n_packs,
@@ -179,7 +171,7 @@ def main() -> None:
         coupling = rtg_module_enabled(cfg) and param_value(cfg, "rtg", "coupling_fraction") is not None
         st.text(format_results_table(results, coupling, cfg))
         sens = run_n_packs_sensitivity(cfg, specific_energy=se_high, n_list=(1, 2, 4, 8, 16))
-        st.text(format_n_packs_table(sens))
+        st.text(format_n_packs_table(sens, cfg))
         pdf_path = Path("streamlit_report.pdf")
         write_report_pdf(pdf_path, cfg, results, [], [], n_pack_rows=sens)
         with pdf_path.open("rb") as f:

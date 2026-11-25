@@ -1308,6 +1308,73 @@ def thermal_q_per_pack_stuck_open_radiator(
     return th.q_per_pack_w + q_rad_open
 
 
+def build_q_loss_closed_louver_lut(
+    cfg: Dict[str, Any],
+    fleet_capacity_wh: float,
+    radiator_deployed_m2_per_pack: float,
+    n_points: int = 60,
+) -> Tuple[List[float], List[float]]:
+    import numpy as np
+
+    temps = [float(x) for x in np.linspace(40.0, 290.0, max(5, n_points))]
+    q_vals = []
+    for t in temps:
+        th = compute_thermal_loss(
+            cfg,
+            t_box_k=t,
+            fleet_capacity_wh=fleet_capacity_wh,
+            radiator_operating=False,
+            radiator_deployed_area_m2_per_pack=radiator_deployed_m2_per_pack,
+            q_radiator_reject_per_pack_w=0.0,
+        )
+        q_vals.append(th.q_per_pack_w)
+    return temps, q_vals
+
+
+def integrate_louvers_closed_survival(
+    cfg: Dict[str, Any],
+    mass_per_pack_kg: float,
+    cp_j_kgk: float,
+    t_start_k: float,
+    duration_h: float,
+    p_load_fleet_w: float,
+    eta: float,
+    eta_definition: str,
+    fleet_capacity_wh: float,
+    radiator_deployed_m2_per_pack: float,
+    *,
+    dt_s: float = 120.0,
+    lipo_limit_k: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Night at survival load, louvers closed: T-dependent box, legs, and closed-radiator leak."""
+    n_packs = max(1, int(param_value(cfg, "geometry", "n_packs") or 1))
+    q_int_fleet, _ = pick_internal_heat(internal_waste_heat_w(p_load_fleet_w, eta), eta_definition)
+    mc = mass_per_pack_kg * cp_j_kgk
+    q_lut = build_q_loss_closed_louver_lut(cfg, fleet_capacity_wh, radiator_deployed_m2_per_pack)
+    t = 0.0
+    t_end_s = duration_h * 3600.0
+    temp = t_start_k
+    energy_out_j = 0.0
+    time_to_lipo_h: Optional[float] = None
+    while t < t_end_s - 1e-9:
+        step = min(dt_s, t_end_s - t)
+        q_loss_pp = q_loss_from_lut(temp, q_lut[0], q_lut[1])
+        q_int_pp = q_int_fleet / n_packs
+        q_net_out_pp = q_loss_pp - q_int_pp
+        energy_out_j += q_net_out_pp * n_packs * step
+        temp -= q_net_out_pp * step / mc
+        t += step
+        if lipo_limit_k is not None and time_to_lipo_h is None and temp <= lipo_limit_k:
+            time_to_lipo_h = t / 3600.0
+    return {
+        "t_final_k": temp,
+        "delta_t_k": temp - t_start_k,
+        "time_to_lipo_h": time_to_lipo_h,
+        "margin_lipo_k": (temp - lipo_limit_k) if lipo_limit_k is not None else None,
+        "energy_net_out_kwh": max(0.0, energy_out_j / 3.6e6),
+    }
+
+
 def integrate_louvers_stuck_open_survival(
     cfg: Dict[str, Any],
     mass_per_pack_kg: float,
@@ -1518,13 +1585,26 @@ def solve_case(
 
     mass_for_transient = transient_mass_kg or (primary_pack.mass_kg if primary_pack else battery.mass_kg)
     q_net_no_rtg = thermal.q_total_w - q_internal
-    dT = lumped_transient_delta_t_k(q_net_no_rtg, mass_for_transient, cp, t_dark)
     dT_stuck: Optional[float] = None
     p_be: Optional[float] = None
     stuck_below_lipo: Optional[bool] = None
     if primary_case is not None and fallback_branch == "same_pack_survival":
         n_stuck = max(1, thermal.n_packs)
         mass_pp = mass_for_transient / n_stuck
+        closed = integrate_louvers_closed_survival(
+            thermal_cfg,
+            mass_pp,
+            cp,
+            t_box,
+            t_dark,
+            load_w,
+            eta,
+            eta_def,
+            cap_wh,
+            primary_case.thermal.radiator_area_per_pack_m2,
+            lipo_limit_k=lipo_lim,
+        )
+        dT = closed["delta_t_k"]
         stuck = integrate_louvers_stuck_open_survival(
             thermal_cfg,
             mass_pp,
@@ -1541,6 +1621,8 @@ def solve_case(
         )
         dT_stuck = stuck["delta_t_k"]
         stuck_below_lipo = stuck["margin_lipo_k"] is not None and stuck["margin_lipo_k"] < 0
+    else:
+        dT = lumped_transient_delta_t_k(q_net_no_rtg, mass_for_transient, cp, t_dark)
     if fallback_branch == "primary":
         th_closed = compute_thermal_loss(
             thermal_cfg,
@@ -2010,18 +2092,23 @@ def run_n_packs_sensitivity(
     return rows
 
 
-def format_n_packs_table(rows: List[Dict[str, Any]]) -> str:
+def format_n_packs_table(rows: List[Dict[str, Any]], cfg: Optional[Dict[str, Any]] = None) -> str:
     lines = [
         "",
         "=" * 100,
         "N_PACKS SENSITIVITY (5 kW fleet, 200 Wh/kg, V_pack = (C/n)/ρ_vol)",
         "=" * 100,
     ]
+    thr = lipo_margin_threshold_k(cfg) if cfg else None
+    alert_hdr = "!" if thr is not None else "-"
     lines.append(
         f"{'n':>3} {'sys/kg':>7} {'Qloss_f':>8} {'Qexc_f':>8} {'Qleak_f':>7} {'Pbe/kW':>7} "
-        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf':>6} {'dLiPo':>6} {'Warm_f':>7} {'!':>1}"
+        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf':>6} {'dLiPo':>6} {'Warm_f':>7} {alert_hdr:>1}"
     )
-    lines.append("(fleet W/kWh unless _pp = per pack; ! = margin below threshold when set)")
+    if thr is None and cfg is not None:
+        lines.append("(fleet W/kWh unless _pp = per pack; LiPo margin threshold unset)")
+    else:
+        lines.append("(fleet W/kWh unless _pp = per pack; ! = margin below threshold when set)")
     for row in rows:
         tf = f"{row['cold_tf_k']:.1f}" if row["cold_tf_k"] is not None else "—"
         dm = f"{row['cold_margin_k']:.1f}" if row.get("cold_margin_k") is not None else "—"
@@ -2148,7 +2235,7 @@ def write_report_pdf(
             fig, ax = plt.subplots(figsize=(8.5, 11))
             ax.axis("off")
             y = 0.98
-            for line in format_n_packs_table(n_pack_rows).splitlines():
+            for line in format_n_packs_table(n_pack_rows, cfg).splitlines():
                 ax.text(0.03, y, line[:110], fontsize=5, family="monospace", va="top")
                 y -= 0.022
                 if y < 0.03:
@@ -2184,7 +2271,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     placeholders = placeholder_list(cfg)
     print(format_results_table(results, coupling_set, cfg))
     n_sens = run_n_packs_sensitivity(cfg, specific_energy=param_value(cfg, "battery", "specific_energy_wh_per_kg_high") or 200)
-    print(format_n_packs_table(n_sens))
+    print(format_n_packs_table(n_sens, cfg))
     if placeholders:
         print("\n--- placeholder (example values, not Luke's design) ---")
         for t in placeholders:
