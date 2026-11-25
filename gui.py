@@ -43,14 +43,16 @@ HEADER_FG = "#f8fafc"
 CONTENT_BG = "#f8fafc"
 PANE_RIGHT_MIN_WIDTH = 360
 
-METRIC_TILE_SPECS: Tuple[Tuple[str, str], ...] = (
-    ("Pack mass", r"Pack mass\s*=\s*([\d.]+)\s*kg"),
-    ("System mass", r"System mass\s*=\s*([\d.]+)\s*kg"),
-    ("Q_internal", r"Q_internal\s*=\s*([\d.]+)\s*W"),
-    ("Excess heat", r"Excess heat to reject[^:]*:\s*([\d.]+)\s*W"),
-    ("ΔT coast", r"Transient ΔT[^≈]*≈\s*([\d.]+)\s*K"),
-    ("Min temp margin", r"LiPo margin[^:]*:\s*([\d.]+)\s*K"),
+METRIC_TILE_KEYS: Tuple[str, ...] = (
+    "Pack mass",
+    "System mass",
+    "Q_internal",
+    "Excess heat",
+    "ΔT coast",
+    "Min temp margin",
 )
+
+_WHEEL_SCROLL_SEQS = ("<MouseWheel>", "<Button-4>", "<Button-5>")
 
 GUI_FIELD_LABELS: Dict[str, str] = {
     "n_packs": "n_packs",
@@ -164,36 +166,70 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
     style.map("Accent.TButton", background=[("active", ACCENT_COLOR), ("!disabled", "#0f766e")])
     style.configure("MetricCaption.TLabel", font=("Segoe UI", 9), foreground="#64748b")
     style.configure("MetricValue.TLabel", font=("Segoe UI", 15, "bold"), foreground=ACCENT_COLOR)
+    style.configure("MetricWarn.TLabel", font=("Segoe UI", 15, "bold"), foreground="#dc2626")
+    style.configure("MetricAmber.TLabel", font=("Segoe UI", 15, "bold"), foreground="#d97706")
+    style.configure("MetricCase.TLabel", font=("Segoe UI", 8), foreground="#64748b")
     style.configure("MetricTile.TFrame", relief="solid", borderwidth=1)
     root.configure(bg=CONTENT_BG)
     return style
 
 
-def _primary_case_block(table_text: str) -> str:
-    hits = list(re.finditer(r"^---\s*.+?\s*---\s*$", table_text, re.MULTILINE))
-    if not hits:
-        return table_text
-    start = hits[0].start()
-    end = hits[1].start() if len(hits) > 1 else len(table_text)
-    return table_text[start:end]
+def _case_tile_label(result: Any) -> str:
+    name = getattr(result, "load_name", "case")
+    se = getattr(result, "specific_energy_wh_kg", 0.0)
+    return f"{name} @ {float(se):.0f} Wh/kg"
 
 
-def _extract_primary_metrics(table_text: str) -> List[Tuple[str, str]]:
-    block = _primary_case_block(table_text)
-    out: List[Tuple[str, str]] = []
-    for label, pattern in METRIC_TILE_SPECS:
-        hit = re.search(pattern, block)
-        if hit:
-            val = hit.group(1)
-            if "mass" in label.lower():
-                out.append((label, f"{val} kg"))
-            elif label == "Q_internal" or label == "Excess heat":
-                out.append((label, f"{val} W"))
-            else:
-                out.append((label, f"{val} K"))
-        else:
-            out.append((label, "—"))
+def metrics_from_case_results(results: List[Any]) -> Dict[str, Tuple[str, str, str]]:
+    """Tile caption -> (value, case subtitle, tone: normal|warn|amber)."""
+    if not results:
+        return {k: ("—", "", "normal") for k in METRIC_TILE_KEYS}
+    primary = next(
+        (r for r in results if getattr(r, "case", None) == "primary" and getattr(r, "specific_energy_wh_kg", 0) == 150),
+        None,
+    )
+    if primary is None:
+        primary = next((r for r in results if getattr(r, "case", None) == "primary"), results[0])
+    plbl = _case_tile_label(primary)
+    pack = getattr(primary.battery, "mass_kg", None)
+    sys_m = getattr(primary, "system_mass_kg", None)
+    dt = getattr(primary, "transient_delta_t_k", None)
+    out: Dict[str, Tuple[str, str, str]] = {
+        "Pack mass": (f"{pack:.1f} kg" if pack is not None else "—", plbl, "normal"),
+        "System mass": (f"{sys_m:.1f} kg" if sys_m is not None else "—", plbl, "normal"),
+        "Q_internal": (f"{primary.q_internal_w:.1f} W", plbl, "normal"),
+        "Excess heat": (f"{primary.q_excess_w:.1f} W", plbl, "normal"),
+        "ΔT coast": (f"{dt:.2f} K" if dt is not None else "—", plbl, "normal"),
+    }
+    min_margin: Optional[float] = None
+    min_lbl = ""
+    for r in results:
+        for val in (getattr(r, "coast_margin_lipo_k", None), getattr(r, "coast_stuck_open_margin_lipo_k", None)):
+            if val is None:
+                continue
+            if min_margin is None or float(val) < min_margin:
+                min_margin = float(val)
+                min_lbl = _case_tile_label(r)
+    if min_margin is not None:
+        tone = "warn" if min_margin < 0 else ("amber" if min_margin < 6.0 else "normal")
+        out["Min temp margin"] = (f"{min_margin:.2f} K", min_lbl, tone)
+    else:
+        out["Min temp margin"] = ("—", "", "normal")
     return out
+
+
+def _sizing_worker(
+    run_id: int,
+    base_cfg: dict,
+    snapshot: Dict[str, Any],
+    out_queue: "queue.Queue[Tuple[int, Tuple[str, Any]]]",
+) -> None:
+    try:
+        cfg, text, results, sens = run_sizing_report(base_cfg, _SnapshotControls(snapshot))
+        payload: Tuple[str, Any] = ("ok", (cfg, text, results, sens, snapshot))
+    except Exception as e:
+        payload = ("err", e)
+    out_queue.put((run_id, payload))
 
 
 class SizerGUI:
@@ -234,6 +270,11 @@ class SizerGUI:
         self._sizing_queue: queue.Queue[Tuple[int, Tuple[str, Any]]] = queue.Queue()
         self._auto_run_after_load = auto_run_after_load
         self._metric_vars: Dict[str, tk.StringVar] = {}
+        self._metric_case_vars: Dict[str, tk.StringVar] = {}
+        self._metric_value_labels: Dict[str, ttk.Label] = {}
+        self._last_display_generation = 0
+        self._pane_heading_label: Optional[ttk.Label] = None
+        self._wheel_redirect_tag = "MoonBaseWheelToCanvas"
 
         header = tk.Frame(root, bg=HEADER_BG, height=72)
         header.pack(fill=tk.X)
@@ -307,14 +348,18 @@ class SizerGUI:
 
         self._metrics_frame = ttk.Frame(results_card)
         self._metrics_frame.pack(fill=tk.X, pady=(0, 6))
-        tile_labels = [spec[0] for spec in METRIC_TILE_SPECS]
-        for idx, caption in enumerate(tile_labels):
+        for idx, caption in enumerate(METRIC_TILE_KEYS):
             var = tk.StringVar(value="—")
+            case_var = tk.StringVar(value="")
             self._metric_vars[caption] = var
+            self._metric_case_vars[caption] = case_var
             tile = ttk.Frame(self._metrics_frame, style="MetricTile.TFrame", padding=8)
             tile.grid(row=idx // 3, column=idx % 3, sticky="nsew", padx=4, pady=4)
             ttk.Label(tile, text=caption, style="MetricCaption.TLabel").pack(anchor=tk.W)
-            ttk.Label(tile, textvariable=var, style="MetricValue.TLabel").pack(anchor=tk.W)
+            val_lbl = ttk.Label(tile, textvariable=var, style="MetricValue.TLabel")
+            val_lbl.pack(anchor=tk.W)
+            self._metric_value_labels[caption] = val_lbl
+            ttk.Label(tile, textvariable=case_var, style="MetricCase.TLabel", wraplength=200).pack(anchor=tk.W)
         for col in range(3):
             self._metrics_frame.columnconfigure(col, weight=1, uniform="metrics")
 
@@ -326,7 +371,7 @@ class SizerGUI:
             text_wrap,
             wrap=tk.NONE,
             state=tk.DISABLED,
-            font=("Consolas", 9),
+            font=("DejaVu Sans Mono", 9),
             relief=tk.FLAT,
             borderwidth=0,
             padx=6,
@@ -358,6 +403,9 @@ class SizerGUI:
             side=tk.LEFT, fill=tk.X, expand=True
         )
 
+        for seq in _WHEEL_SCROLL_SEQS:
+            root.bind_class(self._wheel_redirect_tag, seq, self._wheel_redirect_to_canvas)
+
         self._readonly_scale_tag = "MoonBaseReadonlyScale"
         for seq in (
             "<Button-1>",
@@ -371,9 +419,10 @@ class SizerGUI:
             "<ButtonRelease-2>",
             "<ButtonRelease-3>",
             "<Key>",
-            "<MouseWheel>",
         ):
             root.bind_class(self._readonly_scale_tag, seq, lambda _e: "break")
+        for seq in _WHEEL_SCROLL_SEQS:
+            root.bind_class(self._readonly_scale_tag, seq, self._wheel_redirect_to_canvas)
 
         self._build_tuning_controls()
         start = config_path if config_path is not None else program_config_path()
@@ -413,6 +462,9 @@ class SizerGUI:
         self._tuning_canvas.yview_scroll(delta, "units")
         return "break"
 
+    def _wheel_redirect_to_canvas(self, event: tk.Event) -> str:
+        return self._scale_wheel_scrolls_canvas(event)
+
     def _scale_wheel_scrolls_canvas(self, event: tk.Event) -> str:
         if event.delta:
             delta = -1 if event.delta > 0 else 1
@@ -425,6 +477,11 @@ class SizerGUI:
         self._tuning_canvas.yview_scroll(delta, "units")
         return "break"
 
+    def _attach_wheel_redirect(self, widget: tk.Misc) -> None:
+        tags = widget.bindtags()
+        if self._wheel_redirect_tag not in tags:
+            widget.bindtags((self._wheel_redirect_tag,) + tags)
+
     def _layout_panes(self) -> None:
         self.root.update_idletasks()
         try:
@@ -436,6 +493,9 @@ class SizerGUI:
             self._tuning_canvas.itemconfigure(self._tuning_canvas_window, width=cv_w)
         except tk.TclError:
             pass
+        if self._pane_heading_label is not None:
+            wrap = max(self._tuning_canvas.winfo_width() - 16, 280)
+            self._pane_heading_label.configure(wraplength=wrap)
 
     def layout_panes_for_display(self) -> None:
         """Public hook for tests and screenshot capture."""
@@ -496,11 +556,13 @@ class SizerGUI:
             widget.pack_forget()
             unset_ph.pack(side=tk.LEFT, padx=4)
             widget.bind("<ButtonRelease-1>", self._on_scale_release, add=True)
-            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-                widget.bind(seq, self._scale_wheel_scrolls_canvas, add=True)
+            widget.bind("<KeyRelease>", self._on_scale_key_release, add=True)
+            for seq in _WHEEL_SCROLL_SEQS:
+                widget.bind(seq, self._wheel_redirect_to_canvas, add=True)
         else:
             widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
             unset_ph.pack_forget()
+            self._attach_wheel_redirect(widget)
             widget.bind("<Return>", lambda _e, uid=ui_id: self._schedule_auto_sizing(0, uid), add=True)
             widget.bind("<FocusOut>", lambda _e, uid=ui_id: self._schedule_auto_sizing(0, uid), add=True)
         own = ttk.Label(
@@ -532,6 +594,35 @@ class SizerGUI:
         if self._populating_cfg or not self._controls_editable:
             return
         self._schedule_auto_sizing(0)
+
+    def _on_scale_key_release(self, event: tk.Event) -> None:
+        if self._populating_cfg or not self._controls_editable:
+            return
+        if event.keysym in ("Left", "Right", "Up", "Down", "Prior", "Next"):
+            self._schedule_auto_sizing(0)
+
+    def _controls_match_snapshot(self, snapshot: Mapping[str, Any]) -> bool:
+        for uid, val in snapshot.items():
+            if uid not in self.controls:
+                continue
+            if str(self.controls[uid].get()) != str(val):
+                return False
+        return True
+
+    def _sync_sizing_active(self) -> None:
+        self._sizing_active = (
+            self._sizing_inflight > 0 or not self._sizing_queue.empty() or self._sizing_pending
+        )
+
+    def _schedule_queue_poll(self) -> None:
+        if not (self._sizing_inflight > 0 or not self._sizing_queue.empty()):
+            return
+        try:
+            if self._poll_after_id is not None:
+                self.root.after_cancel(self._poll_after_id)
+            self._poll_after_id = self.root.after(25, self._poll_sizing_queue)
+        except tk.TclError:
+            self._poll_after_id = None
 
     def _schedule_debounced_sizing(self) -> None:
         if self._debounce_after_id is not None:
@@ -582,85 +673,102 @@ class SizerGUI:
         snapshot = {uid: self.controls[uid].get() for uid in self.controls}
         base_cfg = copy.deepcopy(self.base_cfg)
 
-        def worker() -> None:
-            try:
-                cfg, text, results, sens = run_sizing_report(base_cfg, _SnapshotControls(snapshot))
-                payload: Tuple[str, Any] = ("ok", (cfg, text, results, sens))
-            except Exception as e:
-                payload = ("err", e)
-            self._sizing_queue.put((run_id, payload))
-
-        threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(
+            target=_sizing_worker,
+            args=(run_id, base_cfg, snapshot, self._sizing_queue),
+            daemon=True,
+        ).start()
+        self._schedule_queue_poll()
         self._poll_sizing_queue()
 
     def _poll_sizing_queue(self) -> None:
-        try:
-            run_id, payload = self._sizing_queue.get_nowait()
+        self._poll_after_id = None
+        while True:
+            try:
+                run_id, payload = self._sizing_queue.get_nowait()
+            except queue.Empty:
+                break
             self._finish_sizing_run(run_id, payload)
-        except queue.Empty:
-            if self._sizing_active:
-                try:
-                    if self._poll_after_id is not None:
-                        self.root.after_cancel(self._poll_after_id)
-                    self._poll_after_id = self.root.after(25, self._poll_sizing_queue)
-                except tk.TclError:
-                    self._poll_after_id = None
+        self._sync_sizing_active()
+        if not self._sizing_active and self._sizing_inflight == 0:
+            if str(self.update_banner.cget("text")) == "Updating…":
+                self.update_banner.configure(text="")
+        self._update_pdf_button_state()
+        self._update_run_button_state()
+        self._schedule_queue_poll()
 
     def _finish_sizing_run(self, run_id: int, payload: Tuple[str, Any]) -> None:
         self._sizing_inflight = max(0, self._sizing_inflight - 1)
-        self._sizing_active = self._sizing_inflight > 0
-        if run_id != self._sizing_generation:
-            self._poll_sizing_queue()
-            return
-        kind, data = payload
-        if kind == "ok":
-            cfg, text, results, sens = data
-            self.last_working_cfg = copy.deepcopy(cfg)
-            self.last_results = results
-            self.last_sens = sens
-            self._last_valid_results_text = text
-            self._results_fresh = True
-            self.update_banner.configure(text="")
-            self._set_results_display(text, current=True)
-            self._set_status("Sizing up to date")
-        else:
-            err = data
-            if isinstance(err, (UiInputError, ConfigError)):
-                self._set_status(f"Input error: {err}")
+        stale = run_id != self._sizing_generation
+        if not stale:
+            kind, data = payload
+            if kind == "ok":
+                if len(data) == 4:
+                    cfg, text, results, sens = data
+                    snapshot: Dict[str, Any] = {}
+                else:
+                    cfg, text, results, sens, snapshot = data
+                self.last_working_cfg = copy.deepcopy(cfg)
+                self.last_results = results
+                self.last_sens = sens
+                self._last_valid_results_text = text
+                self._results_fresh = True
                 self.update_banner.configure(text="")
-                self._show_results_error(str(err))
-            elif isinstance(err, DesignInputError):
-                self._set_status("Design incomplete")
-                self.update_banner.configure(text="")
-                self._show_results_error("Blocked:\n" + "\n".join(f"  • {m}" for m in err.missing))
+                self._set_results_display(text, current=True)
+                self._refresh_metric_tiles_from_results(results)
+                self._last_display_generation = run_id
+                if snapshot and not self._controls_match_snapshot(snapshot):
+                    self._set_status("Inputs changed — updating…")
+                    self._mark_results_stale()
+                    self._schedule_auto_sizing(50)
+                else:
+                    self._set_status("Sizing up to date")
             else:
-                self._set_status("Sizing failed")
-                self.update_banner.configure(text="")
-                messagebox.showerror("Run failed", str(err))
-                self._show_results_error(str(err))
-        self._update_pdf_button_state()
-        self._update_run_button_state()
+                err = data
+                if isinstance(err, (UiInputError, ConfigError)):
+                    self._set_status(f"Input error: {err}")
+                    self.update_banner.configure(text="")
+                    self._show_results_error(str(err))
+                elif isinstance(err, DesignInputError):
+                    self._set_status("Design incomplete")
+                    self.update_banner.configure(text="")
+                    self._show_results_error("Blocked:\n" + "\n".join(f"  • {m}" for m in err.missing))
+                else:
+                    self._set_status("Sizing failed")
+                    self.update_banner.configure(text="")
+                    messagebox.showerror("Run failed", str(err))
+                    self._show_results_error(str(err))
 
     def _show_results_error(self, message: str) -> None:
         if self._last_valid_results_text:
             banner = f"(Last valid run — current inputs not applied)\n\n{message}\n\n"
             self._set_results_display(self._last_valid_results_text, current=False, prefix=banner)
-            self._refresh_metric_tiles(self._last_valid_results_text)
+            if self.last_results is not None:
+                self._refresh_metric_tiles_from_results(self.last_results)
         else:
             self._set_results_display(message, current=False)
             self._clear_metric_tiles()
 
-    def _refresh_metric_tiles(self, body: str) -> None:
-        if "P_load" in body or "Pack mass" in body:
-            for caption, value in _extract_primary_metrics(body):
-                if caption in self._metric_vars:
-                    self._metric_vars[caption].set(value)
-        else:
-            self._clear_metric_tiles()
+    def _refresh_metric_tiles_from_results(self, results: List[Any]) -> None:
+        tiles = metrics_from_case_results(results)
+        for caption, (val, case_lbl, tone) in tiles.items():
+            if caption not in self._metric_vars:
+                continue
+            self._metric_vars[caption].set(val)
+            self._metric_case_vars[caption].set(case_lbl)
+            style = {
+                "warn": "MetricWarn.TLabel",
+                "amber": "MetricAmber.TLabel",
+            }.get(tone, "MetricValue.TLabel")
+            self._metric_value_labels[caption].configure(style=style)
 
     def _clear_metric_tiles(self) -> None:
         for var in self._metric_vars.values():
             var.set("—")
+        for var in self._metric_case_vars.values():
+            var.set("")
+        for caption, lbl in self._metric_value_labels.items():
+            lbl.configure(style="MetricValue.TLabel")
 
     def _set_results_display(self, body: str, *, current: bool, prefix: str = "") -> None:
         text = prefix + body
@@ -668,11 +776,7 @@ class SizerGUI:
         self.results_text.delete("1.0", tk.END)
         self.results_text.insert(tk.END, text)
         self.results_text.configure(state=tk.DISABLED)
-        if current:
-            self._refresh_metric_tiles(body)
-        elif body and ("P_load" in body or "Pack mass" in body):
-            self._refresh_metric_tiles(body)
-        elif not prefix:
+        if not current and not prefix:
             self._clear_metric_tiles()
 
     def _apply_scale_readonly_tags(self, locked: bool) -> None:
@@ -709,11 +813,13 @@ class SizerGUI:
             self.controls[ui_id].set(str(float(val)))
 
     def _build_tuning_controls(self) -> None:
-        ttk.Label(
+        self._pane_heading_label = ttk.Label(
             self.tuning_frame,
-            text="Parameters (change to auto-update after release or typing pause)",
+            text="Parameters — sizing updates after slider release or typing pause",
             style="Header.TLabel",
-        ).pack(anchor=tk.W, pady=(0, 8))
+            wraplength=TUNING_PANEL_MIN_WIDTH - 32,
+        )
+        self._pane_heading_label.pack(anchor=tk.W, pady=(0, 8))
 
         def scale(row: ttk.Frame, var: tk.Variable, from_, to, resolution=1.0) -> tk.Widget:
             return _horizontal_scale(row, var, from_=from_, to=to, resolution=resolution)
@@ -900,14 +1006,11 @@ class SizerGUI:
             self._debounce_after_id = None
         self._sizing_generation += 1
         self._sizing_pending = False
-        self._sizing_inflight = 0
-        self._sizing_active = False
         self.update_banner.configure(text="")
-        try:
-            self.root.after_cancel(getattr(self, "_poll_after_id", None))
-        except (tk.TclError, TypeError, ValueError):
-            pass
-        self._poll_after_id = None
+        self._sync_sizing_active()
+        if self._sizing_inflight > 0 or not self._sizing_queue.empty():
+            self.update_banner.configure(text="Updating…")
+        self._schedule_queue_poll()
 
     def _populate_controls_from_cfg(self, *, allow_partial: bool) -> None:
         assert self.base_cfg is not None
