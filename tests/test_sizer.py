@@ -12,17 +12,19 @@ import yaml
 from sizer import (
     ConfigError,
     DesignInputError,
+    FinSolverError,
     SIGMA_DEFAULT,
     analytic_constant_h_fin_w,
     blocking_missing,
+    bvp_constant_h_fin_w,
     box_radiation_loss_w,
     compute_night_energy_wh,
     compute_pack_mass_kg,
     compute_required_capacity_wh,
     compute_series_count,
+    compute_thermal_loss,
     discharge_efficiency_for_sizing,
     end_face_exposure_factor,
-    finite_difference_constant_h_fin_w,
     heater_shortfall_w,
     internal_waste_heat_w,
     leg_conduction_network_w,
@@ -35,6 +37,7 @@ from sizer import (
     regolith_spreading_resistance_k_per_w,
     run_all_cases,
     solve_case,
+    solve_linear_h_fin_bvp,
     solve_radiating_leg_fin,
     total_ring_radiating_area_m2,
     validate_for_run,
@@ -75,12 +78,8 @@ def test_night_energy_wh():
 
 
 def test_pack_mass_hand_calc():
-    e_night = 360_000.0
-    dod, eta_dis, se, pack = 0.8, 0.948683, 200.0, 1.05
-    cap = compute_required_capacity_wh(e_night, dod, eta_dis)
-    expected = (cap / se) * pack
-    assert compute_pack_mass_kg(cap, se, pack) == pytest.approx(expected, rel=1e-9)
-    assert expected == pytest.approx(cap / se * pack, rel=1e-9)
+    cap = 474341.6
+    assert compute_pack_mass_kg(cap, 200.0, 1.0) == pytest.approx(2371.71, rel=1e-4)
 
 
 def test_capacity_uses_discharge_eta_round_trip():
@@ -163,10 +162,7 @@ def test_radiation_zero_at_uniform_T():
 
 def test_ring_area_eight_boxes():
     total, _ = total_ring_radiating_area_m2(8, 1.0, 0.8, 0.6, 3.0)
-    ef = end_face_exposure_factor(8, 3.0, 1.0, 0.8)
-    per = per_box_face_areas_m2(1.0, 0.8, 0.6, ef)
-    expected = 8 * sum(per.values())
-    assert total == pytest.approx(expected, rel=1e-6)
+    assert total == pytest.approx(30.08, rel=1e-4)
 
 
 def test_regolith_spreading_disk_formula():
@@ -199,8 +195,23 @@ def test_constant_h_fin_analytic_fd_tanh():
     manual = m_val * (FIN_BENCH["t_root"] - FIN_BENCH["t_inf"]) * math.tanh(m * FIN_BENCH["length_m"])
     assert qa == pytest.approx(manual, rel=1e-9)
     for n in (12, 50, 200):
-        qn = finite_difference_constant_h_fin_w(**FIN_BENCH, n_nodes=n)
+        qn = bvp_constant_h_fin_w(**FIN_BENCH, n_nodes=n)
         assert qn == pytest.approx(qa, rel=0.01)
+
+
+def test_linear_fin_bvp_forced_failure():
+    with pytest.raises(FinSolverError):
+        solve_linear_h_fin_bvp(
+            FIN_BENCH["k_leg"],
+            FIN_BENCH["a_cross"],
+            FIN_BENCH["perimeter_m"],
+            FIN_BENCH["length_m"],
+            FIN_BENCH["t_root"],
+            FIN_BENCH["t_inf"],
+            FIN_BENCH["h_lin"],
+            12,
+            max_nodes=8,
+        )
 
 
 def test_radiating_leg_grid_convergence():
@@ -250,6 +261,30 @@ def test_example_primary_thermal_targets(example_cfg):
     assert r.q_internal_w == pytest.approx(q_int, rel=1e-6)
     assert r.thermal.q_leg_w > 0
     assert r.thermal.q_total_w == pytest.approx(r.thermal.q_box_rad_w + r.thermal.q_leg_w + r.thermal.q_passthrough_w, rel=1e-4)
+
+
+def test_example_known_primary_thermal_numbers(example_cfg):
+    r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    assert r.thermal.q_leg_w == pytest.approx(20.36, rel=0.001)
+    assert r.thermal.q_total_w == pytest.approx(210.22, rel=0.001)
+    assert r.q_excess_w == pytest.approx(60.24, rel=0.001)
+
+
+def test_example_same_pack_survival_transient_dt(example_cfg):
+    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    surv = solve_case(
+        "survival_100W", 100, 200, example_cfg,
+        fallback_branch="same_pack_survival", primary_pack=prim.battery, transient_mass_kg=prim.battery.mass_kg,
+    )
+    assert surv.transient_delta_t_k == pytest.approx(-22.38, rel=0.001)
+
+
+def test_lander_deck_missing_temperature_raises(example_cfg):
+    bad = copy.deepcopy(example_cfg)
+    bad["geometry"]["bottom_radiates_to"]["value"] = "lander_deck"
+    bad["thermal_environment"]["lander_deck_temperature_k"]["value"] = None
+    with pytest.raises(ConfigError, match="lander_deck_temperature_k"):
+        compute_thermal_loss(bad)
 
 
 def test_primary_more_internal_than_survival(example_cfg):

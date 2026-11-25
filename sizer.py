@@ -478,6 +478,7 @@ def solve_linear_h_fin_bvp(
     h_lin: float,
     n_mesh: int,
     rtol: float = 1e-5,
+    max_nodes: Optional[int] = None,
 ) -> Tuple[float, "np.ndarray", "np.ndarray"]:
     """Constant-h straight fin, adiabatic tip; returns Q, x, T."""
     import numpy as np
@@ -493,11 +494,10 @@ def solve_linear_h_fin_bvp(
         return np.array([ya[0] - t_root, yb[1]])
 
     x = np.linspace(0.0, length_m, max(3, n_mesh))
-    tg = t_inf + (t_root - t_inf) * np.cosh(np.sqrt(h_lin * perimeter_m / ka) * (length_m - x)) / np.cosh(
-        np.sqrt(h_lin * perimeter_m / ka) * length_m
-    )
+    tg = np.linspace(t_root, t_inf, len(x))
     y0 = np.vstack([tg, np.gradient(tg, x, edge_order=2)])
-    sol = solve_bvp(fun, bc, x, y0, tol=rtol, max_nodes=max(5000, 4 * n_mesh), verbose=0)
+    node_cap = max_nodes if max_nodes is not None else max(5000, 4 * n_mesh)
+    sol = solve_bvp(fun, bc, x, y0, tol=rtol, max_nodes=node_cap, verbose=0)
     if not sol.success:
         raise FinSolverError(f"Linear fin BVP failed: {sol.message}")
     x_f = sol.x
@@ -506,11 +506,11 @@ def solve_linear_h_fin_bvp(
     return max(0.0, q), x_f, T_f
 
 
-def finite_difference_constant_h_fin_w(
+def bvp_constant_h_fin_w(
     k_leg: float, a_cross: float, perimeter_m: float, length_m: float, t_root: float, t_inf: float,
     h_lin: float, n_nodes: int,
 ) -> float:
-    """BVP discretization for constant-h fin (mesh size = n_nodes)."""
+    """Constant-h fin heat loss via BVP (initial mesh = n_nodes)."""
     q, _, _ = solve_linear_h_fin_bvp(k_leg, a_cross, perimeter_m, length_m, t_root, t_inf, h_lin, n_nodes)
     return q
 

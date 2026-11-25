@@ -89,12 +89,12 @@ battery:
   box_target_temperature_k:
     value: 273.15
     units: K
-    source: "Luke — hold battery box at 0 C"
+    source: "Luke's choice — Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (273 K optimal hold temperature)"
     owner: luke
   lipo_cold_limit_k:
     value: 233
     units: K
-    source: "Luke — Requirements doc low-temperature limit check"
+    source: "Luke's Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (sources listed there: Cold Electronics for Lunar Missions; Flight Battery Program 2010)"
     owner: luke
   pack_specific_heat_j_per_kgk:
     value: null
@@ -107,7 +107,7 @@ thermal_environment:
     value: 3
     units: K
     source: "Fixsen 2009 CMB"
-    owner: cited-example
+    owner: luke
   night_surface_k:
     value: 40
     units: K
