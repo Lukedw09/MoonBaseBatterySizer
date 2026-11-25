@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Capture Round-29 GUI screenshots at 1280x800 under xvfb."""
+"""Capture GUI screenshots at 1280x800 under xvfb (Round 29/30)."""
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import threading
 import time
@@ -16,7 +17,7 @@ ARTIFACTS = Path("/opt/cursor/artifacts")
 GEOMETRY = "1280x800+0+0"
 
 
-def _grab_png(root, path: Path) -> None:
+def _grab_png(root, path: Path) -> str:
     from PIL import ImageGrab
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +27,19 @@ def _grab_png(root, path: Path) -> None:
     w, h = root.winfo_width(), root.winfo_height()
     img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
     img.save(path)
-    print(f"wrote {path}", flush=True)
+    digest = hashlib.md5(path.read_bytes()).hexdigest()
+    print(f"wrote {path} md5={digest}", flush=True)
+    return digest
+
+
+def _prime_window(root, app) -> None:
+    root.deiconify()
+    root.geometry(GEOMETRY)
+    root.update_idletasks()
+    app.layout_panes_for_display()
+    app.tuning_frame.update_idletasks()
+    app._tuning_canvas.configure(scrollregion=app._tuning_canvas.bbox("all"))
+    root.update()
 
 
 def _wait_results(app, root, *, timeout: float = 120.0) -> None:
@@ -40,15 +53,29 @@ def _wait_results(app, root, *, timeout: float = 120.0) -> None:
     raise RuntimeError("timed out waiting for sizing")
 
 
+def _scroll_tuning_to_bottom(app, root) -> None:
+    app.tuning_frame.update_idletasks()
+    bbox = app._tuning_canvas.bbox("all")
+    if bbox:
+        app._tuning_canvas.configure(scrollregion=bbox)
+    root.update()
+    for _ in range(80):
+        app._tuning_canvas.yview_scroll(3, "units")
+        root.update()
+    app._tuning_canvas.yview_moveto(1.0)
+    root.update()
+
+
 def main() -> None:
     import tkinter as tk
 
     import gui
-    from gui import SizerGUI
+    from gui import SizerGUI, TUNING_PANEL_MIN_WIDTH
     from gui_logic import EXAMPLE_CFG, LUKE_CFG, run_sizing_report as _real_report
 
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     gate = threading.Event()
+    digests: dict[str, str] = {}
 
     def slow_report(base_cfg, controls):
         gate.wait(timeout=120.0)
@@ -56,42 +83,67 @@ def main() -> None:
 
     # (a) Example config after auto-update
     root = tk.Tk()
-    root.geometry(GEOMETRY)
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=True)
+    _prime_window(root, app)
     _wait_results(app, root)
-    _grab_png(root, ARTIFACTS / "r29-example-after-auto-update.png")
+    digests["a"] = _grab_png(root, ARTIFACTS / "r30-example-after-auto-update.png")
+    assert app._tuning_pane.winfo_width() >= TUNING_PANEL_MIN_WIDTH - 16
     app._cancel_pending_sizing()
     root.destroy()
 
-    # (b) Luke config blocked
+    # (b) Luke config blocked (results pane)
     root = tk.Tk()
-    root.geometry(GEOMETRY)
-    SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
-    root.update()
-    _grab_png(root, ARTIFACTS / "r29-luke-blocked.png")
+    app_b = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
+    _prime_window(root, app_b)
+    digests["b"] = _grab_png(root, ARTIFACTS / "r30-luke-blocked.png")
     root.destroy()
 
-    # (c) Mid-update Updating…
+    # (e) Luke config — parameter pane with unset fields visible
+    root = tk.Tk()
+    app_e = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
+    _prime_window(root, app_e)
+    app_e.tuning_frame.update_idletasks()
+    app_e._tuning_canvas.configure(scrollregion=app_e._tuning_canvas.bbox("all"))
+    for _ in range(24):
+        app_e._tuning_canvas.yview_scroll(2, "units")
+        root.update()
+    digests["e"] = _grab_png(root, ARTIFACTS / "r30-luke-parameters-unset.png")
+    root.destroy()
+
+    # (c) Mid-update: prior results visible + Updating…
+    gui.run_sizing_report = _real_report
+    root = tk.Tk()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
+    _prime_window(root, app)
+    app.run_sizing()
+    _wait_results(app, root)
+    prior = app._last_valid_results_text or ""
+    assert "Pack mass" in prior
     gate.clear()
     gui.run_sizing_report = slow_report
-    root = tk.Tk()
-    root.geometry(GEOMETRY)
-    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    root.update()
+    app.controls["n_packs"].set("6")
     app._start_sizing_run()
     root.update()
-    _grab_png(root, ARTIFACTS / "r29-mid-update.png")
+    assert "Updating" in app.update_banner.cget("text")
+    assert "Pack mass" in app.results_text.get("1.0", tk.END)
+    digests["c"] = _grab_png(root, ARTIFACTS / "r30-mid-update.png")
     gate.set()
-    _wait_results(app, root)
-
-    # (d) Parameters pane scrolled to bottom (same session as c)
-    app._tuning_canvas.configure(scrollregion=(0, 0, 360, 3200))
-    app._tuning_canvas.yview_moveto(1.0)
-    root.update()
-    _grab_png(root, ARTIFACTS / "r29-pane-scrolled-bottom.png")
-    app._cancel_pending_sizing()
     gui.run_sizing_report = _real_report
+    app._cancel_pending_sizing()
     root.destroy()
+
+    # (d) Parameters pane scrolled to bottom
+    root = tk.Tk()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
+    _prime_window(root, app)
+    _scroll_tuning_to_bottom(app, root)
+    y0, y1 = app._tuning_canvas.yview()
+    assert y1 > 0.95, f"scroll not at bottom: {y0}, {y1}"
+    digests["d"] = _grab_png(root, ARTIFACTS / "r30-pane-scrolled-bottom.png")
+    assert digests["d"] != digests["a"], "scroll shot must differ from (a)"
+    root.destroy()
+
+    print("md5 summary:", digests, flush=True)
 
 
 if __name__ == "__main__":

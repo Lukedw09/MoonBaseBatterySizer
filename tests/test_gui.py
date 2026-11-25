@@ -47,11 +47,12 @@ def test_fraction_scales_display_after_example_load():
     from gui_logic import EXAMPLE_CFG
 
     root = tk.Tk()
-    root.withdraw()
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    root.update_idletasks()
+    root.geometry("1280x800")
     root.deiconify()
+    root.update_idletasks()
     app._sync_all_scales()
+    app.layout_panes_for_display()
     app._fit_window_to_content()
     root.update()
 
@@ -77,7 +78,8 @@ def test_fraction_scales_display_after_example_load():
         assert scale.winfo_viewable()
         _assert_scale_inside_row(scale)
 
-    assert app._tuning_pane.winfo_width() >= TUNING_PANEL_MIN_WIDTH - 8
+    assert app._paned.sashpos(0) >= TUNING_PANEL_MIN_WIDTH - 2
+    assert app._tuning_pane.winfo_width() >= TUNING_PANEL_MIN_WIDTH - 16
 
     root.destroy()
 
@@ -461,6 +463,27 @@ def test_save_pdf_disabled_while_sizing_updates(monkeypatch):
     _wait_sizing_idle(app, root)
     assert str(app.pdf_btn.cget("state")) == tk.NORMAL
     app._cancel_pending_sizing()
+    root.destroy()
+
+
+def test_parameter_pane_visible_and_dod_scale_mapped():
+    import tkinter as tk
+
+    from gui import SizerGUI, TUNING_PANEL_MIN_WIDTH
+    from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    root.geometry("1280x800")
+    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
+    root.deiconify()
+    root.update_idletasks()
+    app.layout_panes_for_display()
+    root.update()
+    pane_w = app._tuning_pane.winfo_width()
+    assert pane_w >= TUNING_PANEL_MIN_WIDTH - 16, f"tuning pane collapsed to {pane_w}px"
+    dod = app._scales["depth_of_discharge"]
+    assert dod.winfo_ismapped()
+    assert dod.winfo_width() > 0
     root.destroy()
 
 

@@ -34,9 +34,23 @@ except ImportError:  # pragma: no cover - headless CI may lack tkinter
     tk = None  # type: ignore[misc, assignment]
     filedialog = messagebox = ttk = None  # type: ignore[misc, assignment]
 
-TUNING_PANEL_MIN_WIDTH = 560
+TUNING_PANEL_MIN_WIDTH = 520
 SCALE_LENGTH = 190
 AUTO_SIZING_DEBOUNCE_MS = 600
+ACCENT_COLOR = "#0d9488"
+HEADER_BG = "#0f172a"
+HEADER_FG = "#f8fafc"
+CONTENT_BG = "#f8fafc"
+PANE_RIGHT_MIN_WIDTH = 360
+
+METRIC_TILE_SPECS: Tuple[Tuple[str, str], ...] = (
+    ("Pack mass", r"Pack mass\s*=\s*([\d.]+)\s*kg"),
+    ("System mass", r"System mass\s*=\s*([\d.]+)\s*kg"),
+    ("Q_internal", r"Q_internal\s*=\s*([\d.]+)\s*W"),
+    ("Excess heat", r"Excess heat to reject[^:]*:\s*([\d.]+)\s*W"),
+    ("ΔT coast", r"Transient ΔT[^≈]*≈\s*([\d.]+)\s*K"),
+    ("Min temp margin", r"LiPo margin[^:]*:\s*([\d.]+)\s*K"),
+)
 
 GUI_FIELD_LABELS: Dict[str, str] = {
     "n_packs": "n_packs",
@@ -57,7 +71,7 @@ GUI_FIELD_LABELS: Dict[str, str] = {
 }
 
 CONTROL_SECTIONS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
-    ("Geometry & loads", ("n_packs", "primary_w", "t_dark_h")),
+    ("Geometry", ("n_packs", "primary_w", "t_dark_h")),
     (
         "Battery",
         (
@@ -67,9 +81,9 @@ CONTROL_SECTIONS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
             "depth_of_discharge",
             "efficiency",
             "packaging_insulation_mass_factor",
-            "box_target_temperature_k",
         ),
     ),
+    ("Thermal", ("box_target_temperature_k",)),
     ("Radiator", ("radiator_temperature_k", "radiator_emissivity")),
     ("Wake panel", ("warm_up_h", "panel_efficiency", "sun_incidence_cosine")),
 )
@@ -126,28 +140,60 @@ def _apply_theme(root: tk.Tk) -> ttk.Style:
         style.theme_use("clam")
     except tk.TclError:
         pass
-    style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"))
-    style.configure("Section.TLabelframe", padding=10)
-    style.configure("Section.TLabelframe.Label", font=("Segoe UI", 10, "bold"))
-    style.configure("ResultsHeadline.TLabel", font=("Segoe UI", 11), padding=4)
-    style.configure("Status.TLabel", font=("Segoe UI", 9))
-    style.configure("Update.TLabel", font=("Segoe UI", 10, "italic"), foreground="#b45309")
-    style.configure("Primary.TButton", padding=(10, 4))
-    root.configure(bg=style.lookup("TFrame", "background"))
+    style.configure(".", background=CONTENT_BG)
+    style.configure("TFrame", background=CONTENT_BG)
+    style.configure("App.TFrame", background=CONTENT_BG)
+    style.configure("TLabel", background=CONTENT_BG, foreground="#0f172a")
+    style.configure("TLabelframe", background=CONTENT_BG, bordercolor="#cbd5e1")
+    style.configure("TLabelframe.Label", background=CONTENT_BG, foreground=ACCENT_COLOR, font=("Segoe UI", 10, "bold"))
+    style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"), foreground="#0f172a", background=CONTENT_BG)
+    style.configure("Section.TLabelframe", padding=12)
+    style.configure("Section.TLabelframe.Label", font=("Segoe UI", 10, "bold"), foreground=ACCENT_COLOR)
+    style.configure("Results.TLabelframe", padding=10)
+    style.configure("Status.TLabel", font=("Segoe UI", 9), foreground="#475569")
+    style.configure("StatusBar.TFrame", background="#e2e8f0")
+    style.configure("Update.TLabel", font=("Segoe UI", 10, "bold"), foreground="#b45309", background=CONTENT_BG)
+    style.configure("TButton", padding=(12, 6), font=("Segoe UI", 9))
+    style.configure(
+        "Accent.TButton",
+        padding=(12, 6),
+        font=("Segoe UI", 9, "bold"),
+        background="#0f766e",
+        foreground=HEADER_FG,
+    )
+    style.map("Accent.TButton", background=[("active", ACCENT_COLOR), ("!disabled", "#0f766e")])
+    style.configure("MetricCaption.TLabel", font=("Segoe UI", 9), foreground="#64748b")
+    style.configure("MetricValue.TLabel", font=("Segoe UI", 15, "bold"), foreground=ACCENT_COLOR)
+    style.configure("MetricTile.TFrame", relief="solid", borderwidth=1)
+    root.configure(bg=CONTENT_BG)
     return style
 
 
-def _extract_result_headline(table_text: str) -> str:
-    lines: List[str] = []
-    for line in table_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if re.search(r"P_load|Q_internal|Q_loss|fleet|mass", stripped, re.I):
-            lines.append(stripped)
-        if len(lines) >= 5:
-            break
-    return "\n".join(lines)
+def _primary_case_block(table_text: str) -> str:
+    hits = list(re.finditer(r"^---\s*.+?\s*---\s*$", table_text, re.MULTILINE))
+    if not hits:
+        return table_text
+    start = hits[0].start()
+    end = hits[1].start() if len(hits) > 1 else len(table_text)
+    return table_text[start:end]
+
+
+def _extract_primary_metrics(table_text: str) -> List[Tuple[str, str]]:
+    block = _primary_case_block(table_text)
+    out: List[Tuple[str, str]] = []
+    for label, pattern in METRIC_TILE_SPECS:
+        hit = re.search(pattern, block)
+        if hit:
+            val = hit.group(1)
+            if "mass" in label.lower():
+                out.append((label, f"{val} kg"))
+            elif label == "Q_internal" or label == "Excess heat":
+                out.append((label, f"{val} W"))
+            else:
+                out.append((label, f"{val} K"))
+        else:
+            out.append((label, "—"))
+    return out
 
 
 class SizerGUI:
@@ -183,28 +229,51 @@ class SizerGUI:
         self._sizing_inflight = 0
         self._sizing_generation = 0
         self._debounce_after_id: Optional[str] = None
+        self._poll_after_id: Optional[str] = None
         self._last_valid_results_text: Optional[str] = None
-        self._last_valid_headline: str = ""
         self._sizing_queue: queue.Queue[Tuple[int, Tuple[str, Any]]] = queue.Queue()
         self._auto_run_after_load = auto_run_after_load
+        self._metric_vars: Dict[str, tk.StringVar] = {}
 
-        top = ttk.Frame(root, padding=(12, 10, 12, 6))
-        top.pack(fill=tk.X)
-        ttk.Label(top, text="Config:", style="Header.TLabel").pack(side=tk.LEFT)
-        self.config_name_label = ttk.Label(top, text="—", font=("Segoe UI", 10, "bold"))
-        self.config_name_label.pack(side=tk.LEFT, padx=(8, 16))
-        ttk.Button(top, text="Browse…", command=self._browse_config).pack(side=tk.LEFT, padx=4)
-        ttk.Button(top, text="Open example…", command=self._load_example_config).pack(side=tk.LEFT, padx=4)
+        header = tk.Frame(root, bg=HEADER_BG, height=72)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        tk.Label(
+            header,
+            text="Moon Base Battery Sizer",
+            bg=HEADER_BG,
+            fg=HEADER_FG,
+            font=("Segoe UI", 16, "bold"),
+        ).pack(side=tk.LEFT, padx=(18, 24), pady=18)
+        cfg_row = tk.Frame(header, bg=HEADER_BG)
+        cfg_row.pack(side=tk.RIGHT, padx=14, pady=12)
+        tk.Label(cfg_row, text="Config:", bg=HEADER_BG, fg="#94a3b8", font=("Segoe UI", 10)).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        self.config_name_label = tk.Label(
+            cfg_row, text="—", bg=HEADER_BG, fg=HEADER_FG, font=("Segoe UI", 10, "bold")
+        )
+        self.config_name_label.pack(side=tk.LEFT, padx=(0, 14))
+        ttk.Button(cfg_row, text="Browse…", command=self._browse_config, style="Accent.TButton").pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(cfg_row, text="Open example…", command=self._load_example_config).pack(side=tk.LEFT, padx=4)
 
-        paned = ttk.Panedwindow(root, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        body = ttk.Frame(root, padding=(10, 8, 10, 6))
+        body.pack(fill=tk.BOTH, expand=True)
+        self._body = body
+
+        paned = ttk.Panedwindow(body, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True)
         self._paned = paned
 
-        left_outer = ttk.Frame(paned)
+        left_outer = ttk.Frame(paned, style="App.TFrame", width=TUNING_PANEL_MIN_WIDTH)
         self._tuning_pane = left_outer
-        paned.add(left_outer, weight=0)
+        paned.add(left_outer, weight=1)
 
-        self._tuning_canvas = tk.Canvas(left_outer, highlightthickness=0, borderwidth=0)
+        self._tuning_canvas = tk.Canvas(
+            left_outer, highlightthickness=0, borderwidth=0, bg="#ffffff", width=TUNING_PANEL_MIN_WIDTH - 20
+        )
         scroll = ttk.Scrollbar(left_outer, orient=tk.VERTICAL, command=self._tuning_canvas.yview)
         self.tuning_frame = ttk.Frame(self._tuning_canvas, padding=4)
         self._tuning_canvas_window = self._tuning_canvas.create_window(
@@ -225,44 +294,64 @@ class SizerGUI:
         self._bind_tuning_mousewheel(self._tuning_canvas)
         self._bind_tuning_mousewheel(self.tuning_frame)
 
-        right = ttk.Frame(paned, padding=8)
-        paned.add(right, weight=2)
+        self._right_pane = ttk.Frame(paned, padding=(0, 0, 0, 0))
+        paned.add(self._right_pane, weight=3)
 
-        results_card = ttk.Labelframe(right, text="Results", style="Section.TLabelframe", padding=8)
+        right = ttk.Frame(self._right_pane, padding=4)
+        right.pack(fill=tk.BOTH, expand=True)
+
+        results_card = ttk.Labelframe(right, text="Results", style="Results.TLabelframe")
         results_card.pack(fill=tk.BOTH, expand=True)
         self.update_banner = ttk.Label(results_card, text="", style="Update.TLabel")
-        self.update_banner.pack(anchor=tk.W)
-        self.results_headline = ttk.Label(
-            results_card, text="", style="ResultsHeadline.TLabel", justify=tk.LEFT, wraplength=520
-        )
-        self.results_headline.pack(anchor=tk.W, pady=(0, 6))
-        text_wrap = ttk.Frame(results_card)
+        self.update_banner.pack(anchor=tk.W, pady=(0, 2))
+
+        self._metrics_frame = ttk.Frame(results_card)
+        self._metrics_frame.pack(fill=tk.X, pady=(0, 6))
+        tile_labels = [spec[0] for spec in METRIC_TILE_SPECS]
+        for idx, caption in enumerate(tile_labels):
+            var = tk.StringVar(value="—")
+            self._metric_vars[caption] = var
+            tile = ttk.Frame(self._metrics_frame, style="MetricTile.TFrame", padding=8)
+            tile.grid(row=idx // 3, column=idx % 3, sticky="nsew", padx=4, pady=4)
+            ttk.Label(tile, text=caption, style="MetricCaption.TLabel").pack(anchor=tk.W)
+            ttk.Label(tile, textvariable=var, style="MetricValue.TLabel").pack(anchor=tk.W)
+        for col in range(3):
+            self._metrics_frame.columnconfigure(col, weight=1, uniform="metrics")
+
+        details_card = ttk.Labelframe(results_card, text="Details", style="Section.TLabelframe", padding=4)
+        details_card.pack(fill=tk.BOTH, expand=True)
+        text_wrap = ttk.Frame(details_card)
         text_wrap.pack(fill=tk.BOTH, expand=True)
         self.results_text = tk.Text(
             text_wrap,
-            wrap=tk.WORD,
+            wrap=tk.NONE,
             state=tk.DISABLED,
             font=("Consolas", 9),
             relief=tk.FLAT,
             borderwidth=0,
-            padx=4,
-            pady=4,
+            padx=6,
+            pady=6,
+            bg="#ffffff",
+            fg="#0f172a",
+            height=14,
         )
         yscroll = ttk.Scrollbar(text_wrap, orient=tk.VERTICAL, command=self.results_text.yview)
-        self.results_text.configure(yscrollcommand=yscroll.set)
+        xscroll = ttk.Scrollbar(text_wrap, orient=tk.HORIZONTAL, command=self.results_text.xview)
+        self.results_text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
         self.results_text.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
         text_wrap.rowconfigure(0, weight=1)
         text_wrap.columnconfigure(0, weight=1)
 
         btn_row = ttk.Frame(right)
         btn_row.pack(fill=tk.X, pady=(8, 0))
-        self.run_btn = ttk.Button(btn_row, text="Run sizing", style="Primary.TButton", command=self.run_sizing)
+        self.run_btn = ttk.Button(btn_row, text="Run sizing", style="Accent.TButton", command=self.run_sizing)
         self.run_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.pdf_btn = ttk.Button(btn_row, text="Save PDF", command=self.save_pdf, state=tk.DISABLED)
         self.pdf_btn.pack(side=tk.LEFT, padx=4)
 
-        status = ttk.Frame(root, padding=(12, 4))
+        status = ttk.Frame(root, style="StatusBar.TFrame", padding=(12, 6))
         status.pack(fill=tk.X)
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(status, textvariable=self.status_var, style="Status.TLabel", anchor=tk.W).pack(
@@ -289,6 +378,8 @@ class SizerGUI:
         self._build_tuning_controls()
         start = config_path if config_path is not None else program_config_path()
         self._load_config_path(start)
+        self.root.bind("<Map>", lambda _e: self._layout_panes(), add=True)
+        self.root.after_idle(self._layout_panes)
         self.root.after_idle(self._fit_window_to_content)
 
     def _bind_tuning_mousewheel(self, widget: tk.Misc) -> None:
@@ -334,15 +425,30 @@ class SizerGUI:
         self._tuning_canvas.yview_scroll(delta, "units")
         return "break"
 
-    def _fit_window_to_content(self) -> None:
+    def _layout_panes(self) -> None:
         self.root.update_idletasks()
         try:
             self._paned.sashpos(0, TUNING_PANEL_MIN_WIDTH)
         except tk.TclError:
             pass
-        w = max(self.root.winfo_reqwidth() + 24, TUNING_PANEL_MIN_WIDTH + 480)
-        h = max(self.root.winfo_reqheight() + 16, 640)
-        self.root.minsize(min(w, 1280), min(h, 900))
+        try:
+            cv_w = max(self._tuning_canvas.winfo_width(), TUNING_PANEL_MIN_WIDTH - 24)
+            self._tuning_canvas.itemconfigure(self._tuning_canvas_window, width=cv_w)
+        except tk.TclError:
+            pass
+
+    def layout_panes_for_display(self) -> None:
+        """Public hook for tests and screenshot capture."""
+        self._layout_panes()
+
+    def _fit_window_to_content(self) -> None:
+        self.root.update_idletasks()
+        self._layout_panes()
+        w = max(TUNING_PANEL_MIN_WIDTH + PANE_RIGHT_MIN_WIDTH + 40, 1200)
+        h = max(self.root.winfo_reqheight(), 640)
+        self.root.minsize(w, 640)
+        if self.root.winfo_width() < w or self.root.winfo_height() < h:
+            self.root.geometry(f"{w}x{h}")
 
     def _browse_config(self) -> None:
         path = filedialog.askopenfilename(
@@ -494,9 +600,11 @@ class SizerGUI:
         except queue.Empty:
             if self._sizing_active:
                 try:
-                    self.root.after(25, self._poll_sizing_queue)
+                    if self._poll_after_id is not None:
+                        self.root.after_cancel(self._poll_after_id)
+                    self._poll_after_id = self.root.after(25, self._poll_sizing_queue)
                 except tk.TclError:
-                    pass
+                    self._poll_after_id = None
 
     def _finish_sizing_run(self, run_id: int, payload: Tuple[str, Any]) -> None:
         self._sizing_inflight = max(0, self._sizing_inflight - 1)
@@ -511,7 +619,6 @@ class SizerGUI:
             self.last_results = results
             self.last_sens = sens
             self._last_valid_results_text = text
-            self._last_valid_headline = _extract_result_headline(text)
             self._results_fresh = True
             self.update_banner.configure(text="")
             self._set_results_display(text, current=True)
@@ -538,10 +645,22 @@ class SizerGUI:
         if self._last_valid_results_text:
             banner = f"(Last valid run — current inputs not applied)\n\n{message}\n\n"
             self._set_results_display(self._last_valid_results_text, current=False, prefix=banner)
-            self.results_headline.configure(text=self._last_valid_headline)
+            self._refresh_metric_tiles(self._last_valid_results_text)
         else:
             self._set_results_display(message, current=False)
-            self.results_headline.configure(text="")
+            self._clear_metric_tiles()
+
+    def _refresh_metric_tiles(self, body: str) -> None:
+        if "P_load" in body or "Pack mass" in body:
+            for caption, value in _extract_primary_metrics(body):
+                if caption in self._metric_vars:
+                    self._metric_vars[caption].set(value)
+        else:
+            self._clear_metric_tiles()
+
+    def _clear_metric_tiles(self) -> None:
+        for var in self._metric_vars.values():
+            var.set("—")
 
     def _set_results_display(self, body: str, *, current: bool, prefix: str = "") -> None:
         text = prefix + body
@@ -550,7 +669,11 @@ class SizerGUI:
         self.results_text.insert(tk.END, text)
         self.results_text.configure(state=tk.DISABLED)
         if current:
-            self.results_headline.configure(text=_extract_result_headline(body))
+            self._refresh_metric_tiles(body)
+        elif body and ("P_load" in body or "Pack mass" in body):
+            self._refresh_metric_tiles(body)
+        elif not prefix:
+            self._clear_metric_tiles()
 
     def _apply_scale_readonly_tags(self, locked: bool) -> None:
         for scale in self._scales.values():
@@ -630,6 +753,14 @@ class SizerGUI:
                     self._new_control_var(ui_id, root),
                     build=builders[ui_id],
                 )
+
+        legs = self._section_parent("Legs")
+        ttk.Label(
+            legs,
+            text="Leg conductor geometry and thermal mesh use YAML fields only (not edited in this pane).",
+            wraplength=TUNING_PANEL_MIN_WIDTH - 40,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
 
     def _new_control_var(self, ui_id: str, master: tk.Misc) -> tk.Variable:
         if ui_id in self._scale_ui_ids:
@@ -713,7 +844,6 @@ class SizerGUI:
         self.last_sens = None
         self.last_working_cfg = None
         self._last_valid_results_text = None
-        self._last_valid_headline = ""
         try:
             self.base_cfg = load_config(path)
             self.loaded_path = path
@@ -724,7 +854,7 @@ class SizerGUI:
             self.config_name_label.configure(text="—")
             self._set_tuning_state(False)
             self._set_results_display(f"Could not load config:\n{e}", current=False)
-            self.results_headline.configure(text="")
+            self._clear_metric_tiles()
             self._set_status("Failed to load config")
             return
 
@@ -744,7 +874,7 @@ class SizerGUI:
                 lines.extend(f"  • {m}" for m in layout_notes)
             lines.append("\nUse Open example… or Browse… for a runnable demo.")
             self._set_results_display("\n".join(lines), current=False)
-            self.results_headline.configure(text="")
+            self._clear_metric_tiles()
             self._set_status(f"Blocked — {path.name}")
             self.root.after_idle(self._sync_all_scales)
             self.root.after_idle(self._fit_window_to_content)
@@ -757,7 +887,7 @@ class SizerGUI:
             lines.extend(["", "Layout (not used by current model):"])
             lines.extend(f"  • {m}" for m in layout_notes)
         self._set_results_display("\n".join(lines), current=False)
-        self.results_headline.configure(text="")
+        self._clear_metric_tiles()
         self._set_status(f"Loaded {path.name}")
         self.root.after_idle(self._sync_all_scales)
         self.root.after_idle(self._fit_window_to_content)
@@ -773,6 +903,11 @@ class SizerGUI:
         self._sizing_inflight = 0
         self._sizing_active = False
         self.update_banner.configure(text="")
+        try:
+            self.root.after_cancel(getattr(self, "_poll_after_id", None))
+        except (tk.TclError, TypeError, ValueError):
+            pass
+        self._poll_after_id = None
 
     def _populate_controls_from_cfg(self, *, allow_partial: bool) -> None:
         assert self.base_cfg is not None
@@ -800,7 +935,7 @@ class SizerGUI:
         blocked, messages = app_gate_blocked(self.base_cfg or {})
         if blocked:
             self._set_results_display("Blocked:\n" + "\n".join(f"  • {m}" for m in messages), current=False)
-            self.results_headline.configure(text="")
+            self._clear_metric_tiles()
             return
         if self._input_invalid or self._any_control_invalid():
             self._set_results_display(
