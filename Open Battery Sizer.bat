@@ -77,8 +77,18 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo Starting Moon Base Battery Sizer in your browser...
-call ".venv\Scripts\streamlit.exe" run app.py
+call ".venv\Scripts\python.exe" -c "import tkinter" 2>nul
+if errorlevel 1 (
+  echo.
+  echo  Tkinter is not available in this Python install.
+  echo  Reinstall Python from https://www.python.org/downloads/ and enable Tcl/Tk.
+  echo.
+  pause
+  exit /b 1
+)
+
+echo Starting Moon Base Battery Sizer...
+call ".venv\Scripts\python.exe" gui.py
 if errorlevel 1 (
   echo.
   echo The app stopped with an error - see message above.

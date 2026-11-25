@@ -2,7 +2,7 @@
 
 Python 3 tool for the **NASA Moon Base Challenge**: sizes **distributed lunar night battery packs** with **per-pack radiators** and **dawn wake solar panels**. Luke owns design numbers in YAML (`owner`: `luke`, `cited-example`, `placeholder`, `numerical`, `TODO-luke`).
 
-## Open the slider UI (easiest — no terminal)
+## Open the sizer window (easiest — no terminal)
 
 1. On GitHub, click **Code → Download ZIP** and unzip the folder anywhere on your computer.
 2. Open the unzipped project folder.
@@ -11,7 +11,11 @@ Python 3 tool for the **NASA Moon Base Challenge**: sizes **distributed lunar ni
    - **macOS:** `Open Battery Sizer.command` (first time: right-click → Open if Gatekeeper asks)
    - **Linux:** `open_battery_sizer.sh` (or double-click if your desktop allows; otherwise run it from a terminal once)
 
-The first launch creates a local `.venv` folder and installs dependencies; later launches are faster. Your browser should open the sizer automatically. If anything fails, the launcher window stays open with a plain-English message (install Python 3 from [python.org](https://www.python.org/downloads/) if prompted).
+The first launch creates a local `.venv` folder and installs dependencies; later launches are faster. A **desktop window** opens with sliders on the left and results on the right. If anything fails, the launcher stays open with a plain-English message.
+
+**Linux note:** If the window does not start, install Tkinter: `sudo apt install python3-tk` (then run the launcher again).
+
+**Python:** Install **Python 3.9 or newer** from [python.org](https://www.python.org/downloads/) if the launcher asks.
 
 ## Quick start (CLI)
 
@@ -21,16 +25,18 @@ python3 sizer.py config.yaml          # blocks until Luke fills TODO-luke fields
 python3 sizer.py examples/example_config.yaml --pdf examples/report.pdf
 ```
 
-## Interactive UI (manual Streamlit)
+## Desktop UI (manual)
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-streamlit run app.py
+python3 gui.py
 ```
 
-Default config in the app is **EXAMPLE ONLY** (`examples/example_config.yaml`). Sliders adjust loads, pack count, volumetric density, temperatures, and wake-panel inputs; **Run sizing** refreshes results and the **n_packs** sweep. Download the PDF from the button.
+Default config is **EXAMPLE ONLY** (`examples/example_config.yaml`). Load another YAML path at the top if needed. Sliders adjust loads, pack count, volumetric density, temperatures, and wake-panel inputs; **Run sizing** fills the results box (including the **n_packs** sweep with `*` / `!` flags). **Save PDF** writes the same report as the CLI.
+
+Incomplete configs (for example `config.yaml` before Luke fills required fields) show the **design blockers** list only — there is no way to run sizing until the YAML is complete.
 
 ## Operating cases (owner: luke)
 
@@ -55,7 +61,7 @@ pip install -r requirements-dev.txt
 python3 -m pytest -q
 ```
 
-The launcher and app only need `requirements.txt`. AppTest needs **streamlit** from that file.
+The launcher and desktop UI only need `requirements.txt`. Tkinter is part of the standard library; on some Linux systems you must install the `python3-tk` package separately.
 
 ## AI use
 

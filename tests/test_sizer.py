@@ -626,27 +626,3 @@ def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatc
         for fig in captured_figs:
             plt.close(fig)
 
-
-def test_streamlit_app_gate_smoke():
-    pytest.importorskip("streamlit")
-    from streamlit.testing.v1 import AppTest
-
-    root = Path(__file__).resolve().parent.parent
-    app_path = root / "app.py"
-    luke = root / "config.yaml"
-    example = root / "examples" / "example_config.yaml"
-    at = AppTest.from_file(str(app_path))
-    at.run(timeout=15)
-    at.sidebar.text_input[0].set_value(str(luke)).run(timeout=15)
-    assert not at.exception
-    blocker_lines = [m.value for m in at.markdown if m.value.startswith("- `")]
-    assert len(blocker_lines) == 22
-
-    at = AppTest.from_file(str(app_path))
-    at.run(timeout=15)
-    at.sidebar.text_input[0].set_value(str(example)).run(timeout=15)
-    run_btn = next(b for b in at.sidebar.button if "Run sizing" in b.label)
-    run_btn.click().run(timeout=120)
-    assert not at.exception
-    assert at.text
-    assert "primary_5000W" in at.text[0].value
