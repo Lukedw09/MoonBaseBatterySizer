@@ -139,12 +139,24 @@ thermal_environment:
     source: "Required when box bottom sees lander_deck (not T_box default)"
     owner: TODO-luke
 
+layout:
+  model:
+    value: distributed_packs
+    units: string
+    source: "Luke — several smaller packs across the base (no central RTG deck)"
+    owner: luke
+
 geometry:
-  n_battery_boxes:
+  n_packs:
     value: null
     units: count
-    source: "Luke — ring layout"
+    source: "Luke — number of physically separated pack/lander units"
     owner: TODO-luke
+  scale_dims_with_n_packs:
+    value: true
+    units: boolean
+    source: "Per-pack box volume ∝ fleet capacity / n_packs"
+    owner: luke
   box_length_m:
     value: null
     units: m
@@ -255,6 +267,11 @@ losses:
     owner: TODO-luke
 
 rtg:
+  enabled:
+    value: false
+    units: boolean
+    source: "Luke layout — no RTG; optional legacy module"
+    owner: luke
   count_list:
     value: [1, 2, 3, 4, 5, 6]
     units: count

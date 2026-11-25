@@ -2,8 +2,15 @@
 # Used for tests, examples/report.pdf, and thermal model verification.
 
 meta:
-  title: "EXAMPLE ONLY — placeholder geometry, not Luke's design"
+  title: "EXAMPLE ONLY — distributed packs + radiators (not Luke's final geometry)"
   mode: "solve_rtg"
+
+layout:
+  model:
+    value: distributed_packs
+    units: string
+    source: "Luke — several smaller packs across base, no central RTG deck"
+    owner: luke
 
 loads:
   primary_w:
@@ -139,11 +146,16 @@ thermal_environment:
     owner: TODO-luke
 
 geometry:
-  n_battery_boxes:
+  n_packs:
     value: 8
     units: count
-    source: "EXAMPLE ring count"
+    source: "Luke — number of physically separated pack/lander units"
     owner: placeholder
+  scale_dims_with_n_packs:
+    value: true
+    units: boolean
+    source: "Volume per pack ∝ fleet capacity / n_packs → linear scale n^(-1/3)"
+    owner: numerical
   box_length_m:
     value: 1.0
     units: m
@@ -159,16 +171,6 @@ geometry:
     units: m
     source: "EXAMPLE"
     owner: placeholder
-  ring_radius_m:
-    value: 3.0
-    units: m
-    source: "EXAMPLE"
-    owner: placeholder
-  bottom_radiates_to:
-    value: "ground"
-    units: string
-    source: "EXAMPLE — bottom to regolith"
-    owner: placeholder
   view_factor_sky_vertical:
     value: 0.5
     units: dimensionless
@@ -179,6 +181,33 @@ geometry:
     units: dimensionless
     source: "Wohl et al. 2024"
     owner: cited-example
+
+radiator:
+  radiator_emissivity:
+    value: 0.92
+    units: dimensionless
+    source: "Z-93 example (Kauder 2005)"
+    owner: cited-example
+  radiator_temperature_k:
+    value: 350
+    units: K
+    source: "EXAMPLE reject temperature — Luke to choose"
+    owner: placeholder
+  radiator_areal_mass_kg_per_m2:
+    value: 4.5
+    units: kg/m^2
+    source: "Colozza 2020 Table 17 louvered radiator"
+    owner: cited-example
+  louver_area_multiplier:
+    value: 1.3
+    units: dimensionless
+    source: "Colozza 2020 — louvered +30% area vs bare"
+    owner: cited-example
+  radiator_night_leak_w_per_pack:
+    value: 2.0
+    units: W
+    source: "EXAMPLE closed radiator / heat-pipe off — see VIPER control valve (Bluethmann 2024 p.13)"
+    owner: placeholder
 
 radiation:
   box_effective_emittance:
@@ -249,6 +278,11 @@ losses:
     owner: placeholder
 
 rtg:
+  enabled:
+    value: false
+    units: boolean
+    source: "Luke layout has no RTG — optional legacy module"
+    owner: luke
   count_list:
     value: [1, 2, 3, 4, 5, 6]
     units: count

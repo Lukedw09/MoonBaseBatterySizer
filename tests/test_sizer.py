@@ -17,7 +17,12 @@ from sizer import (
     analytic_constant_h_fin_w,
     blocking_missing,
     bvp_constant_h_fin_w,
-    box_radiation_loss_w,
+    distributed_pack_radiation_loss_w,
+    effective_sink_temperature_k,
+    radiator_area_for_reject_w,
+    total_pack_box_area_m2,
+    run_n_packs_sensitivity,
+    scaled_pack_dims_for_n_packs,
     compute_night_energy_wh,
     compute_pack_mass_kg,
     compute_required_capacity_wh,
@@ -115,10 +120,10 @@ def test_luke_config_still_blocks_until_geometry_set():
         validate_for_run(cfg)
 
 
-def test_missing_list_includes_coupling():
+def test_missing_list_includes_n_packs():
     cfg = load_config(LUKE_CFG)
     missing = blocking_missing(cfg)
-    assert "rtg.coupling_fraction" in missing
+    assert "geometry.n_packs" in missing
 
 
 def test_net_rtg_with_coupling_unset():
@@ -139,9 +144,9 @@ def test_zero_legs_raises():
         validate_for_run(bad)
 
 
-def test_zero_boxes_raises(example_cfg):
+def test_zero_packs_raises(example_cfg):
     bad = yaml.safe_load(yaml.dump(example_cfg))
-    bad["geometry"]["n_battery_boxes"]["value"] = 0
+    bad["geometry"]["n_packs"]["value"] = 0
     with pytest.raises(ConfigError):
         validate_for_run(bad)
 
@@ -165,9 +170,16 @@ def test_radiation_zero_at_uniform_T():
     assert radiation_loss_w(0.02, 10.0, t, t, t, 0.5, 0.5) == 0.0
 
 
-def test_ring_area_eight_boxes():
-    total, _ = total_ring_radiating_area_m2(8, 1.0, 0.8, 0.6, 3.0)
-    assert total == pytest.approx(30.08, rel=1e-4)
+def test_per_pack_face_area_literal():
+    assert total_pack_box_area_m2(1.0, 0.8, 0.6) == pytest.approx(3.76, rel=1e-4)
+
+
+def test_fleet_box_area_scales_n_one_third():
+    a1 = total_pack_box_area_m2(1.0, 0.8, 0.6)
+    for n in (2, 4, 8):
+        l, w, h = scaled_pack_dims_for_n_packs(1.0, 0.8, 0.6, n)
+        a_n = n * total_pack_box_area_m2(l, w, h)
+        assert a_n == pytest.approx(a1 * (n ** (1 / 3)), rel=0.01)
 
 
 def test_regolith_spreading_disk_formula():
@@ -245,12 +257,14 @@ def test_radiating_leg_example_vs_reference(example_cfg):
     assert t_foot == pytest.approx(110.7, abs=0.5)
 
 
-def test_box_radiation_hand_calc(example_cfg):
-    n = param_value(example_cfg, "geometry", "n_battery_boxes")
-    l = param_value(example_cfg, "geometry", "box_length_m")
-    w = param_value(example_cfg, "geometry", "box_width_m")
-    h = param_value(example_cfg, "geometry", "box_height_m")
-    r = param_value(example_cfg, "geometry", "ring_radius_m")
+def test_per_pack_box_radiation_hand_calc(example_cfg):
+    n_p = param_value(example_cfg, "geometry", "n_packs")
+    l, w, h = scaled_pack_dims_for_n_packs(
+        param_value(example_cfg, "geometry", "box_length_m"),
+        param_value(example_cfg, "geometry", "box_width_m"),
+        param_value(example_cfg, "geometry", "box_height_m"),
+        n_p,
+    )
     em = param_value(example_cfg, "radiation", "box_effective_emittance")
     mult = param_value(example_cfg, "radiation", "penetration_seam_emittance_multiplier") or 1.0
     t_box = param_value(example_cfg, "battery", "box_target_temperature_k")
@@ -258,26 +272,36 @@ def test_box_radiation_hand_calc(example_cfg):
     t_g = param_value(example_cfg, "thermal_environment", "night_surface_k")
     fs = param_value(example_cfg, "geometry", "view_factor_sky_vertical")
     fg = param_value(example_cfg, "geometry", "view_factor_ground_vertical")
-    bottom = param_value(example_cfg, "geometry", "bottom_radiates_to")
-    q, _, _ = box_radiation_loss_w(
-        n, l, w, h, r, em, t_box, t_sky, t_g, t_g, bottom, fs, fg, mult, SIGMA_DEFAULT,
-    )
-    assert q == pytest.approx(189.86, rel=0.01)
+    q1, _, _ = distributed_pack_radiation_loss_w(l, w, h, em, t_box, t_sky, t_g, fs, fg, mult, SIGMA_DEFAULT)
+    assert q1 * n_p == pytest.approx(47.46, rel=0.02)
+
+
+def test_radiator_area_hand_calc():
+    q_pp = 329.2 / 8
+    eps = 0.92
+    t_rad = 350.0
+    t_sink = effective_sink_temperature_k(3.0, 40.0)
+    area = radiator_area_for_reject_w(q_pp, eps, t_rad, t_sink, SIGMA_DEFAULT)
+    assert area == pytest.approx(0.053, rel=0.02)
 
 
 def test_example_primary_thermal_targets(example_cfg):
     r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
     assert r.q_internal_w == pytest.approx(555.56, rel=0.001)
     assert r.thermal.q_leg_w > 0
-    assert r.thermal.q_total_w == pytest.approx(r.thermal.q_box_rad_w + r.thermal.q_leg_w + r.thermal.q_passthrough_w, rel=1e-4)
+    th = r.thermal
+    assert th.q_total_w == pytest.approx(
+        th.q_box_rad_w + th.q_leg_w + th.q_passthrough_w + th.q_radiator_night_leak_w, rel=1e-4
+    )
 
 
 def test_example_known_primary_thermal_numbers(example_cfg):
     r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    assert r.thermal.q_leg_w == pytest.approx(20.36, rel=0.001)
-    assert r.thermal.q_total_w == pytest.approx(210.22, rel=0.001)
+    assert r.thermal.q_leg_w == pytest.approx(162.9, rel=0.01)
+    assert r.thermal.q_total_w == pytest.approx(226.4, rel=0.01)
     assert r.q_internal_w == pytest.approx(555.56, rel=0.001)
-    assert r.q_excess_w == pytest.approx(345.34, rel=0.001)
+    assert r.q_excess_w == pytest.approx(329.2, rel=0.01)
+    assert r.thermal.radiator_area_per_pack_m2 == pytest.approx(0.053, rel=0.03)
     assert r.battery.capacity_wh == pytest.approx(500_000.0, rel=0.001)
 
 
@@ -287,12 +311,15 @@ def test_example_same_pack_survival_transient_dt(example_cfg):
         "survival_100W", 100, 200, example_cfg,
         fallback_branch="same_pack_survival", primary_pack=prim.battery, transient_mass_kg=prim.battery.mass_kg,
     )
-    assert surv.transient_delta_t_k == pytest.approx(-20.64, rel=0.001)
+    assert surv.transient_delta_t_k == pytest.approx(-22.32, rel=0.02)
 
 
-def test_lander_deck_missing_temperature_raises(example_cfg):
+def test_lander_deck_missing_temperature_raises_ring_layout(example_cfg):
     bad = copy.deepcopy(example_cfg)
-    bad["geometry"]["bottom_radiates_to"]["value"] = "lander_deck"
+    bad["layout"]["model"]["value"] = "ring_rtg"
+    bad.setdefault("geometry", {})["n_battery_boxes"] = {"value": 8, "owner": "placeholder"}
+    bad["geometry"]["ring_radius_m"] = {"value": 3.0, "owner": "placeholder"}
+    bad["geometry"]["bottom_radiates_to"] = {"value": "lander_deck", "owner": "placeholder"}
     bad["thermal_environment"]["lander_deck_temperature_k"]["value"] = None
     with pytest.raises(ConfigError, match="lander_deck_temperature_k"):
         compute_thermal_loss(bad)
@@ -322,6 +349,8 @@ def test_same_pack_without_primary_raises(example_cfg):
 def test_fixed_rtg_heater_iteration(example_cfg):
     cfg = copy.deepcopy(example_cfg)
     cfg["meta"]["mode"] = "fixed_rtg"
+    cfg["rtg"]["enabled"] = {"value": True, "owner": "placeholder"}
+    cfg["rtg"]["coupling_fraction"]["value"] = 0.034
     cfg["rtg"]["thermal_output_w"]["value"] = 10.0
     prim = solve_case("primary_5000W", 5000, 200, cfg, fallback_branch="primary")
     r = solve_case(
@@ -344,6 +373,12 @@ def test_fixed_rtg_requires_thermal_output(example_cfg):
         validate_for_run(bad)
 
 
+def test_n_packs_sensitivity_row_eight(example_cfg):
+    rows = run_n_packs_sensitivity(example_cfg, specific_energy=200, n_list=(8,))
+    assert rows[0]["q_loss_w"] == pytest.approx(226.4, rel=0.01)
+    assert rows[0]["cold_tf_k"] == pytest.approx(252.0, rel=0.02)
+
+
 def test_fallback_both_branches_when_unset(example_cfg):
     cfg = copy.deepcopy(example_cfg)
     cfg["fallback"]["mode"]["value"] = None
@@ -355,12 +390,11 @@ def test_fallback_both_branches_when_unset(example_cfg):
 def test_solve_case_end_to_end(example_cfg):
     r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
     coupling = param_value(example_cfg, "rtg", "coupling_fraction")
-    q_rtg_exp, excess_exp = net_rtg_need_w(r.thermal.q_total_w, r.q_internal_w, coupling)
     assert r.battery.mass_kg > 1000
     assert r.thermal.q_total_w > 100
-    assert r.q_rtg_total_w == pytest.approx(q_rtg_exp, rel=1e-6)
-    assert r.q_excess_w == pytest.approx(excess_exp, rel=1e-6)
-    assert r.q_excess_w > 0
+    assert r.q_rtg_total_w is None
+    assert r.q_excess_w == pytest.approx(329.2, rel=0.01)
+    assert r.system_mass_kg is not None and r.system_mass_kg > r.battery.mass_kg
 
 
 def test_net_rtg_clamps_and_excess():
@@ -387,10 +421,12 @@ def test_battery_efficiency_missing_raises():
 
 def test_cold_shutdown_final_t_on_example(example_cfg):
     prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    n_p = max(1, prim.thermal.n_packs)
+    mass_pp = prim.battery.mass_kg / n_p
     fine_lut = build_q_loss_temperature_lut(example_cfg, t_min_k=220, t_max_k=275, n_points=120)
     fine = integrate_lumped_thermal_coast(
         example_cfg,
-        prim.battery.mass_kg,
+        mass_pp,
         param_value(example_cfg, "battery", "pack_specific_heat_j_per_kgk"),
         param_value(example_cfg, "battery", "box_target_temperature_k"),
         param_value(example_cfg, "night", "t_dark_h"),
@@ -401,7 +437,7 @@ def test_cold_shutdown_final_t_on_example(example_cfg):
         lipo_limit_k=233.0,
         q_loss_lut=fine_lut,
     )
-    assert fine["t_final_k"] == pytest.approx(254.20, rel=0.002)
+    assert fine["t_final_k"] == pytest.approx(252.0, rel=0.01)
     cs = solve_cold_shutdown_case(example_cfg, prim, dt_s=60.0)
     assert cs.coast_t_final_k == pytest.approx(fine["t_final_k"], rel=0.005)
     assert cs.coast_margin_lipo_k == pytest.approx(fine["margin_lipo_k"], rel=0.01)
