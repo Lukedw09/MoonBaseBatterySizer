@@ -2,4 +2,4 @@ __pycache__/
 *.pyc
 .pytest_cache/
 /report.pdf
-.venv/
+.venv/streamlit_report.pdf
