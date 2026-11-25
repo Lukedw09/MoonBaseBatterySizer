@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Protocol, Tuple, Union
 
 from sizer import (
+    ConfigError,
     DesignInputError,
     design_blockers,
     format_n_packs_table,
@@ -17,6 +18,7 @@ from sizer import (
     run_n_packs_sensitivity,
     rtg_module_enabled,
     validate_for_run,
+    validate_radiator_temperature,
     write_report_pdf,
 )
 
@@ -99,6 +101,10 @@ def app_gate_blocked(cfg: dict) -> Tuple[bool, List[str]]:
         validate_for_run(cfg)
     except DesignInputError as e:
         return True, list(e.missing)
+    try:
+        validate_radiator_temperature(cfg)
+    except ConfigError as e:
+        return True, [str(e)]
     return False, []
 
 

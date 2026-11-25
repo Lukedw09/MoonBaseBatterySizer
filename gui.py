@@ -6,27 +6,28 @@ from __future__ import annotations
 import copy
 import sys
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Dict, List, Optional
 
 from gui_logic import (
     EXAMPLE_CFG,
     UI_CONTROL_TO_CFG_KEYS,
     app_gate_blocked,
-    apply_ui_values,
-    build_working_cfg,
     default_config_path,
     effective_owner_label,
+    leaf_owner,
     load_config,
-    require_param,
+    param_value,
     run_sizing_report,
     write_sizing_pdf,
 )
+from sizer import DesignInputError
 
 try:
     import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
 except ImportError:  # pragma: no cover - headless CI may lack tkinter
     tk = None  # type: ignore[misc, assignment]
+    filedialog = messagebox = ttk = None  # type: ignore[misc, assignment]
 
 # Left tuning column: label (28 chars) + Scale trough + owner caption — must fit inside paned min width.
 TUNING_PANEL_MIN_WIDTH = 560
@@ -71,7 +72,9 @@ class SizerGUI:
         self.controls: Dict[str, tk.Variable] = {}
         self._scales: Dict[str, tk.Scale] = {}
         self._owner_labels: Dict[str, tk.Label] = {}
+        self._owner_rows: Dict[str, tk.Widget] = {}
         self._tuning_widgets: List[tk.Widget] = []
+        self._results_fresh = False
 
         top = ttk.Frame(root, padding=8)
         top.pack(fill=tk.X)
@@ -172,24 +175,31 @@ class SizerGUI:
     ) -> None:
         row = ttk.Frame(self.tuning_frame)
         row.pack(fill=tk.X, pady=2)
-        ttk.Label(row, text=label, width=28).pack(side=tk.LEFT, anchor=tk.W)
+        row.columnconfigure(1, weight=1)
+        ttk.Label(row, text=label, width=28).grid(row=0, column=0, rowspan=2, sticky=tk.NW)
         widget = build(row, var)
-        if isinstance(widget, tk.Scale):
-            widget.pack(side=tk.LEFT, fill=tk.NONE, expand=False)
-        else:
-            widget.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        own = ttk.Label(row, text="", font=("TkDefaultFont", 8), foreground="gray", wraplength=220)
-        if isinstance(widget, tk.Scale):
-            own.pack(side=tk.LEFT, padx=(2, 0), fill=tk.NONE, expand=False, anchor=tk.N)
-        else:
-            own.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+        is_scale = isinstance(widget, tk.Scale)
+        widget.grid(row=0, column=1, sticky=tk.NW if is_scale else tk.EW)
+        own = ttk.Label(
+            row,
+            text="",
+            font=("TkDefaultFont", 8),
+            foreground="gray",
+            wraplength=TUNING_PANEL_MIN_WIDTH - 28,
+            justify=tk.LEFT,
+        )
+        own.grid(row=1, column=1, sticky=tk.W, pady=(0, 2))
         self._owner_labels[ui_id] = own
+        self._owner_rows[ui_id] = row
         self.controls[ui_id] = var
-        if isinstance(widget, tk.Scale):
+        if is_scale:
             widget.set(float(var.get()) if not isinstance(var, tk.IntVar) else int(var.get()))
             self._scales[ui_id] = widget
         self._tuning_widgets.extend([row, widget, own])
-        var.trace_add("write", lambda *_: self._refresh_owner_caption(ui_id))
+        var.trace_add(
+            "write",
+            lambda *_args, uid=ui_id: (self._refresh_owner_caption(uid), self._invalidate_saved_results()),
+        )
 
     def _build_tuning_controls(self) -> None:
         ttk.Label(
@@ -207,7 +217,7 @@ class SizerGUI:
             "n_packs",
             "n_packs",
             tk.IntVar(master=root, value=8),
-            build=lambda r, v: scale(r, v, 1, 16, 1),
+            build=lambda r, v: ttk.Spinbox(r, textvariable=v, from_=1, to=512, width=12),
         )
         self._add_control(
             "primary_w",
@@ -299,13 +309,23 @@ class SizerGUI:
             return
         keys = UI_CONTROL_TO_CFG_KEYS[ui_id]
         var = self.controls[ui_id]
+        base_val = param_value(self.base_cfg, *keys)
+        prior = leaf_owner(self.base_cfg, *keys) or "unknown"
+        if base_val is None:
+            self._owner_labels[ui_id].configure(text=f"owner: {prior} — unset in YAML")
+            return
         try:
-            val = int(var.get()) if ui_id == "n_packs" else float(var.get())
+            cur = int(var.get()) if ui_id == "n_packs" else float(var.get())
         except tk.TclError:
             return
         self._owner_labels[ui_id].configure(
-            text=f"owner: {effective_owner_label(self.base_cfg, *keys, current_value=val)}"
+            text=f"owner: {effective_owner_label(self.base_cfg, *keys, current_value=cur)}"
         )
+
+    def _invalidate_saved_results(self) -> None:
+        if self._results_fresh:
+            self._results_fresh = False
+            self.pdf_btn.configure(state=tk.DISABLED)
 
     def _set_tuning_state(self, enabled: bool) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
@@ -317,6 +337,8 @@ class SizerGUI:
             except tk.TclError:
                 pass
         self.run_btn.configure(state=state)
+        if not enabled:
+            self.pdf_btn.configure(state=tk.DISABLED)
 
     def _set_results(self, text: str) -> None:
         self.results_text.configure(state=tk.NORMAL)
@@ -330,8 +352,10 @@ class SizerGUI:
 
     def load_config(self) -> None:
         self.pdf_btn.configure(state=tk.DISABLED)
+        self._results_fresh = False
         self.last_results = None
         self.last_sens = None
+        self.last_working_cfg = None
         try:
             path = Path(self.path_var.get().strip())
             self.base_cfg = load_config(path)
@@ -345,39 +369,40 @@ class SizerGUI:
             return
 
         blocked, messages = app_gate_blocked(self.base_cfg)
+        self._populate_controls_from_cfg(allow_partial=blocked)
         if blocked:
             self._set_tuning_state(False)
             lines = [f"Loaded: {path.name}", "", "Design incomplete — fix these before tuning or run:\n"]
             lines.extend(f"  • {m}" for m in messages)
             lines.append("\nUse “Load EXAMPLE config…” or examples/example_config.yaml for a runnable demo.")
             self._set_results("\n".join(lines))
+            self.root.after_idle(self._sync_all_scales)
+            self.root.after_idle(self._fit_window_to_content)
             return
 
-        self._populate_controls_from_cfg()
         self._set_tuning_state(True)
         self._set_results(f"Loaded: {path.name}\n\nAdjust sliders if needed, then click Run sizing.")
         self.root.after_idle(self._sync_all_scales)
         self.root.after_idle(self._fit_window_to_content)
 
-    def _populate_controls_from_cfg(self) -> None:
+    def _populate_controls_from_cfg(self, *, allow_partial: bool) -> None:
         assert self.base_cfg is not None
         cfg = self.base_cfg
         for ui_id, keys in UI_CONTROL_TO_CFG_KEYS.items():
-            val = require_param(cfg, *keys)
+            val = param_value(cfg, *keys)
+            if val is None:
+                self._refresh_owner_caption(ui_id)
+                if not allow_partial:
+                    raise DesignInputError([f"{'.'.join(keys)}"])
+                continue
             if ui_id == "n_packs":
                 self.controls[ui_id].set(int(val))
-                if ui_id in self._scales:
-                    self._scales[ui_id].set(int(val))
             else:
                 fv = float(val)
                 self.controls[ui_id].set(fv)
-                if ui_id in self._scales:
-                    self._scales[ui_id].set(fv)
+            if ui_id in self._scales:
+                self._scales[ui_id].set(int(val) if ui_id == "n_packs" else float(val))
             self._refresh_owner_caption(ui_id)
-        t_box = float(self.controls["box_target_temperature_k"].get())
-        t_rad = float(self.controls["radiator_temperature_k"].get())
-        if t_rad > t_box:
-            self.controls["radiator_temperature_k"].set(t_box)
 
     def _sync_all_scales(self) -> None:
         for ui_id, scale in self._scales.items():
@@ -394,17 +419,23 @@ class SizerGUI:
             return
         try:
             cfg, text, results, sens = run_sizing_report(self.base_cfg or {}, self.controls)
-            self.last_working_cfg = cfg
+            self.last_working_cfg = copy.deepcopy(cfg)
             self.last_results = results
             self.last_sens = sens
             self._set_results(text)
+            self._results_fresh = True
             self.pdf_btn.configure(state=tk.NORMAL)
         except Exception as e:
             messagebox.showerror("Run failed", str(e))
 
     def save_pdf(self) -> None:
-        if self.last_results is None or self.last_sens is None or self.base_cfg is None:
-            messagebox.showinfo("Save PDF", "Run sizing first.")
+        if (
+            not self._results_fresh
+            or self.last_working_cfg is None
+            or self.last_results is None
+            or self.last_sens is None
+        ):
+            messagebox.showinfo("Save PDF", "Run sizing first (controls must match the last run).")
             return
         path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
@@ -414,8 +445,7 @@ class SizerGUI:
         if not path:
             return
         try:
-            cfg = build_working_cfg(self.base_cfg, self.controls)
-            write_sizing_pdf(Path(path), cfg, self.last_results, self.last_sens)
+            write_sizing_pdf(Path(path), self.last_working_cfg, self.last_results, self.last_sens)
             messagebox.showinfo("Save PDF", f"Wrote {path}")
         except Exception as e:
             messagebox.showerror("Save failed", str(e))

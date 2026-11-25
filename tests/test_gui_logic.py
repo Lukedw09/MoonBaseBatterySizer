@@ -104,6 +104,48 @@ def test_gui_blocker_gate_allows_example_config(example_cfg):
     assert messages == []
 
 
+def test_effective_owner_label_includes_was_prior():
+    cfg = load_config(EXAMPLE)
+    label = gui_logic.effective_owner_label(cfg, "loads", "primary_w", current_value=6000.0)
+    assert "ui-override" in label
+    assert "was" in label
+    assert "luke" in label
+
+
+def test_ui_override_owner_tag_in_working_cfg(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    controls = {
+        ui_id: _FakeVar(param_value(example_cfg, *keys))
+        for ui_id, keys in gui_logic.UI_CONTROL_TO_CFG_KEYS.items()
+    }
+    controls["primary_w"] = _FakeVar(6000.0)
+    working = gui_logic.build_working_cfg(example_cfg, controls)
+    assert working["loads"]["primary_w"]["owner"].startswith("ui-override")
+    assert "was" in working["loads"]["primary_w"]["owner"]
+
+
+def test_app_gate_blocks_radiator_above_box_temperature(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["radiator"]["radiator_temperature_k"]["value"] = float(cfg["battery"]["box_target_temperature_k"]["value"]) + 1.0
+    blocked, messages = gui_logic.app_gate_blocked(cfg)
+    assert blocked
+    assert any("radiator_temperature_k" in m for m in messages)
+    assert any("≤" in m or "<=" in m for m in messages)
+
+
+def test_last_working_cfg_mismatch_if_controls_change_after_run(example_cfg):
+    controls = {
+        ui_id: _FakeVar(param_value(example_cfg, *keys))
+        for ui_id, keys in gui_logic.UI_CONTROL_TO_CFG_KEYS.items()
+    }
+    cfg_run, _, _, _ = gui_logic.run_sizing_report(example_cfg, controls)
+    n_run = int(param_value(cfg_run, "geometry", "n_packs"))
+    controls["n_packs"] = _FakeVar(2)
+    cfg_now = gui_logic.build_working_cfg(example_cfg, controls)
+    assert int(param_value(cfg_now, "geometry", "n_packs")) == 2
+    assert n_run != 2
+
+
 def test_pytest_gui_logic_passes_with_tkinter_blocked_subprocess():
     """Logic tests must not import tkinter; simulate missing tkinter and run this file."""
     logic_tests = str(ROOT / "tests" / "test_gui_logic.py")

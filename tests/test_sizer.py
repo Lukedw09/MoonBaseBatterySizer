@@ -553,6 +553,19 @@ def _pdf_sweep_rows_by_n(pdf_text: str) -> dict[int, str]:
     return found
 
 
+def test_examples_report_pdf_page3_nasa_pack_density_citation():
+    pytest.importorskip("pypdf")
+    from pypdf import PdfReader
+
+    pdf = Path(__file__).resolve().parents[1] / "examples" / "report.pdf"
+    assert pdf.is_file()
+    text = "\n".join((p.extract_text() or "") for p in PdfReader(pdf).pages)
+    assert "EXAMPLE ~250 Wh/L" in text
+    assert "NASA Small Spacecraft" in text
+    assert "Luke to confirm" not in text
+    assert "EXAMPLE pack-level ~250 kWh" not in text
+
+
 def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     pytest.importorskip("pypdf")
     from pypdf import PdfReader
@@ -579,10 +592,13 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     assert "BELOW LiPo limit" in text
 
 
-def test_sweep_glyph_width_scale_derived_from_font_size():
-    ref = sweep_pdf_glyph_width_scale(N_PACK_SWEEP_FONT_SIZE)
-    assert ref == pytest.approx(SWEEP_PDF_GLYPH_WIDTH_SCALE)
-    assert sweep_pdf_glyph_width_scale(N_PACK_SWEEP_FONT_SIZE * 2) == pytest.approx(ref * 2)
+def test_sweep_glyph_width_scale_known_values():
+    dpi = 100.0
+    assert sweep_pdf_glyph_width_scale(7.5, dpi) == pytest.approx(1.045, rel=0.002)
+    assert SWEEP_PDF_GLYPH_WIDTH_SCALE == pytest.approx(1.045, rel=0.002)
+    assert sweep_pdf_glyph_width_scale(9.0, dpi) == pytest.approx(0.941, rel=0.002)
+    assert sweep_pdf_glyph_width_scale(10.0, dpi) == pytest.approx(1.045, rel=0.002)
+    assert sweep_pdf_glyph_width_scale(15.0, dpi) == pytest.approx(0.965, rel=0.002)
 
 
 def test_report_pdf_sweep_text_fits_page_width(example_cfg, tmp_path, monkeypatch):

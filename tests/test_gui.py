@@ -20,8 +20,9 @@ pytestmark = pytest.mark.skipif(
 
 def test_gui_module_imports_with_tkinter():
     import gui  # noqa: F401
+    from gui_logic import UI_CONTROL_TO_CFG_KEYS
 
-    assert gui.UI_CONTROL_TO_CFG_KEYS is not None
+    assert UI_CONTROL_TO_CFG_KEYS is not None
 
 
 def _assert_scale_inside_row(scale) -> None:
@@ -110,4 +111,65 @@ def test_all_scales_fit_row_at_max_value():
         sw = scale.winfo_width()
         assert srx + sw <= crx + canvas.winfo_width() + 2
 
+    root.destroy()
+
+
+def test_luke_config_read_only_tuning_run_save_disabled():
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import LUKE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=LUKE_CFG)
+    root.update()
+    assert str(app.run_btn.cget("state")) == tk.DISABLED
+    assert str(app.pdf_btn.cget("state")) == tk.DISABLED
+    assert "luke" in app._owner_labels["pack_volumetric_energy_density_wh_per_m3"].cget("text").lower()
+    assert "unset in YAML" in app._owner_labels["radiator_temperature_k"].cget("text")
+    root.destroy()
+
+
+def test_save_pdf_disabled_after_control_change():
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG)
+    root.update()
+    app.run_sizing()
+    root.update()
+    assert str(app.pdf_btn.cget("state")) == tk.NORMAL
+    app.controls["n_packs"].set(2)
+    root.update()
+    assert str(app.pdf_btn.cget("state")) == tk.DISABLED
+    root.destroy()
+
+
+def test_n_packs_spinbox_keeps_config_value_above_slider_max():
+    import copy
+
+    import tkinter as tk
+    import yaml
+
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+    from sizer import load_config, param_value
+
+    cfg_path = ROOT / "artifacts" / "_n32_config.yaml"
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg = copy.deepcopy(load_config(EXAMPLE_CFG))
+    cfg["geometry"]["n_packs"]["value"] = 32
+    cfg_path.write_text(yaml.dump(cfg), encoding="utf-8")
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=cfg_path)
+    root.update()
+    assert int(app.controls["n_packs"].get()) == 32
+    assert int(param_value(app.base_cfg, "geometry", "n_packs")) == 32
     root.destroy()

@@ -23,19 +23,15 @@ N_PACK_SWEEP_FONT_SIZE = 7.5
 N_PACK_SWEEP_X_FRAC = 0.06
 SWEEP_PDF_PAGE_LABEL = "moonbase_n_pack_sweep"
 N_PACK_SWEEP_FIGURE_DPI = 100.0
-# Empirical monospace px/char measured at N_PACK_SWEEP_FONT_SIZE and N_PACK_SWEEP_FIGURE_DPI.
-_SWEEP_GLYPH_SCREEN_PX_PER_CHAR_AT_REF = 6.0
-_SWEEP_GLYPH_PDF_PX_PER_CHAR_AT_REF = 6.27
-_SWEEP_GLYPH_REF_FONT_PT = 7.5
 
 
 def sweep_pdf_glyph_width_scale(
     font_pt: float = N_PACK_SWEEP_FONT_SIZE,
     dpi: float = N_PACK_SWEEP_FIGURE_DPI,
 ) -> float:
-    """Scale Agg text bbox width to embedded PDF; linear in font_pt at fixed matplotlib dpi."""
-    font_scale = font_pt / _SWEEP_GLYPH_REF_FONT_PT
-    return (_SWEEP_GLYPH_PDF_PX_PER_CHAR_AT_REF / _SWEEP_GLYPH_SCREEN_PX_PER_CHAR_AT_REF) * font_scale
+    """Scale Agg text bbox width to embedded PDF at given font size and figure dpi."""
+    a = 0.60205 * font_pt * dpi / 72.0
+    return a / max(round(a), 1)
 
 
 SWEEP_PDF_GLYPH_WIDTH_SCALE = sweep_pdf_glyph_width_scale()
@@ -2095,7 +2091,7 @@ def write_report_pdf(
             ax.text(0.05, y, "placeholder values (not Luke design):", fontweight="bold")
             y -= 0.025
             for t in ph[:20]:
-                ax.text(0.05, y, f"• {t[:92]}", fontsize=5)
+                ax.text(0.05, y, f"• {t[:120]}", fontsize=5)
                 y -= 0.018
         ax.text(0.05, max(0.35, y), "Values Luke still needs to choose:", fontweight="bold")
         y2 = max(0.32, y - 0.025)
