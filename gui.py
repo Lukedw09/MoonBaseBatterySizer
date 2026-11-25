@@ -49,6 +49,8 @@ def _horizontal_scale(
         length=length,
         showvalue=True,
         digits=digits,
+        sliderrelief=tk.RAISED,
+        borderwidth=1,
     )
 
 
