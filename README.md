@@ -1,66 +1,67 @@
 # Moon Base Battery + RTG Thermal Sizer
 
-Small Python 3 tool for the **NASA Moon Base Challenge**: sizes a **lunar night battery pack** and the **heat-only RTG thermal power** needed to keep battery boxes warm with **zero electric heater load** (primary mode).
-
-Luke (the student) owns the design numbers. The program **does not invent** inputs: every value lives in `config.yaml` with **units**, **source**, and **owner** (`luke`, `cited-example`, or `TODO-luke`).
+Python 3 tool for the **NASA Moon Base Challenge**: sizes a **lunar night battery pack** and **heat-only RTG thermal power** to hold battery boxes at Luke’s target temperature. Luke owns the design numbers; the program reads them from YAML (`owner`: `luke`, `cited-example`, or `TODO-luke`).
 
 ## Quick start
 
 ```bash
 pip install -r requirements.txt
-python sizer.py config.yaml
+python3 sizer.py config.yaml          # stops until Luke fills TODO-luke design fields
+python3 sizer.py examples/example_config.yaml   # EXAMPLE ONLY — placeholder geometry
 ```
 
-This prints a results table and writes `report.pdf` (path overridable with `--pdf`).
+## Config files
 
-## Equations (plain language)
+| File | Role |
+|------|------|
+| `config.yaml` | Luke’s inputs — **no placeholder geometry or RTG coupling** |
+| `examples/example_config.yaml` | **EXAMPLE ONLY** — runnable placeholders for tests/PDF |
 
-1. **Night energy (electrical)**  
-   \(E_{\text{night}} = (P_{\text{load}} + P_{\text{heater}}) \times t_{\text{dark}}\)  
-   Energy the pack must deliver over the lunar night.
+## Equations
 
-2. **Required stored capacity**  
-   \(C = E_{\text{night}} / (\mathrm{DoD} \times \eta)\)  
-   Accounts for depth of discharge and round-trip efficiency.
+1. **Night energy:** \(E_{\text{night}} = (P_{\text{load}} + P_{\text{heater}}) t_{\text{dark}}\)
 
-3. **Pack mass**  
-   \(\mathrm{mass} = C / \text{(specific energy)} \times \text{packaging factor}\)  
-   Specific energy is **pack-level** (Wh/kg), including connectors.
+2. **Capacity (discharge efficiency only):** \(C = E_{\text{night}} / (\mathrm{DoD} \cdot \eta_{\text{dis}})\)  
+   If `eta_definition` is `round_trip`, \(\eta_{\text{dis}} = \sqrt{\eta_{\text{rt}}}\). Charge/array losses are noted separately until Luke chooses `eta_definition`.
 
-4. **Series cells**  
-   \(N_{\text{series}} = \lceil V_{\text{bus}} / V_{\text{cell,nom}} \rceil\)  
-   If **cell capacity (Ah)** is set, the tool also reports parallel strings.
+3. **Pack mass:** \(\mathrm{mass} = C / \text{(specific energy)} \times \text{packaging factor}\)
 
-5. **Thermal loss at the battery box** (fixed \(T_{\text{box}}\) from config)  
-   - **Radiation:**  
-     \(Q_{\text{rad}} = \varepsilon_{\text{eff}} \sigma A \big[ F_{\text{sky}}(T^4 - T_{\text{sky}}^4) + F_{\text{ground}}(T^4 - T_{\text{ground}}^4) \big]\)  
-   - **Leg conduction path** (legs + footpad contact + regolith spreading, parallel legs):  
-     Colozza-style \(Q = (T_{\text{box}} - T_{\text{surface}}) / R_{\text{total}}\)  
-   - **Passthrough/seam** add-on (watts from config)
+4. **Internal waste heat (thermal credit):**  
+   - Round-trip: \(Q_{\text{internal}} = P_{\text{load}} (1/\sqrt{\eta_{\text{rt}}} - 1)\)  
+   - Discharge-only: \(Q_{\text{internal}} = P_{\text{load}} (1/\eta_{\text{dis}} - 1)\)  
+   Both are reported until `eta_definition` is chosen.
 
-6. **RTG thermal (no electric output)**  
-   - **Solve mode (default):** \(P_{\text{heater}} = 0\), \(Q_{\text{RTG}} = Q_{\text{loss}} / \text{coupling}\)  
-   - **Fixed RTG mode:** if given \(Q_{\text{RTG}}\) is too small,  
-     \(P_{\text{heater}} = \max(0, Q_{\text{loss}} - \text{coupling} \times Q_{\text{RTG}})\)  
-     and that feeds back into step 1. With **fixed box geometry**, one iteration settles the heater feedback (mass does not resize the radiating area in the default config).
+5. **Box radiation** — per face (8×1.0×0.8×0.6 m example ≈ **30.08 m²** total including bottom):  
+   outer/inner \(L \times H\), ends \(2 W H\) (reduced if tangential gap \(< W\)), top \(L W\) (\(F_{\text{sky}}=1\)), bottom \(L W\) (\(F_{\text{ground}}=1\) to regolith or deck).  
+   Vertical faces: \(F_{\text{sky}}=F_{\text{ground}}=0.5\) (Wohl et al. 2024 NASA/TM-20240003496).  
+   \(Q = \varepsilon_{\text{eff}} \sigma A \sum F_i (T^4 - T_i^4)\). Effective \(\varepsilon\) may include a **penetration/seam multiplier** (Gilmore p.165, TODO-luke).
 
-## Layout
+6. **Legs as radiating fins** — 1-D discretized rod with conduction and sky/ground radiation (see Incropera & DeWitt, *Fundamentals of Heat and Mass Transfer*, fin analysis; Gilmore *Spacecraft Thermal Control Handbook* for lunar hardware context), **plus** conduction through footpad network.
 
-| Path | Purpose |
-|------|---------|
-| `sizer.py` | Pure sizing/thermal functions + CLI |
-| `config.yaml` | All inputs |
-| `tests/` | `pytest` closed-form checks |
-| `examples/report.pdf` | Sample PDF from default config |
+7. **Regolith spreading (circular disk on half-space):** \(R = 1/(4 k a)\) with \(a=\sqrt{A/\pi}\) (constriction resistance — Incropera; Carslaw & Jaeger). Hayne et al. 2017 Table A1: **k ≈ 7.4×10⁻⁴ W/m·K** near surface, **3.4×10⁻³ W/m·K** at ~6–7 cm; example runs use surface k for foot contact.
 
-## Sensitivity
+8. **RTG thermal (not Slusser RHU-in-cavity):**  
+   \(Q_{\text{RTG}} = \max(0, Q_{\text{loss}} - Q_{\text{internal}}) / f_{\text{coupling}}\)  
+   Requires Luke’s `rtg.coupling_fraction` and `heat_path`. If unset → **Q_loss only** and message.  
+   Informational helper: geometric fraction of isotropic center RTG flux onto inward box faces × absorptance (not a design default).
 
-The PDF includes **Q_RTG** and **pack mass** vs emittance, leg material, specific energy (150/200 Wh/kg), and load (5000 / 100 / 50 W).
+9. **Overheat:** if \(Q_{\text{internal}} > Q_{\text{loss}}\), report **Q_excess** (net need clamps to 0).
+
+10. **Transient check (optional cp):** \(\Delta T \approx -Q_{\text{net}} t_{\text{dark}} / (m c_p)\); compare to `lipo_cold_limit_k`.
+
+11. **Fallback modes** (`TODO-luke`):  
+    - `same_pack_survival` — survival loads, same box geometry (less internal heat).  
+    - `separate_pack` — scale box size from pack mass and volumetric energy density (iterates only in this branch).
+
+## Tests
+
+```bash
+python3 -m pytest -q
+```
 
 ## AI use
 
-- **Code:** written with **AI assistance** (Cursor cloud agent), **directed by Luke** via his Grok Bot assistant.  
-- **Research / cited defaults:** gathered and labeled by an **AI research assistant** from the sources noted in `config.yaml` (Colozza, Slusser, Fixsen, Hayne, Gilmore, Wohl, LEMS-A3 papers, etc.).  
-- Items marked **`cited-example`** in the config and report are **examples, not Luke's final design choices**.
+- **Implementation:** written with **AI assistance** (Cursor cloud agent on PR #1 fixes), **directed by Luke** via his Grok Bot assistant.  
+- **Research:** cited-example parameters (Gilmore MLI \(\varepsilon^*\), Wohl view factors, Hayne regolith \(k\), Okishio contact \(h\), Colozza **tabular Ti k only**, Fixsen \(T_{\text{sky}}\), etc.) were gathered and labeled with **AI research assistance**; Luke must replace every `TODO-luke` and confirm `cited-example` vs `luke` before treating outputs as his design.
 
-Luke must resolve every **`TODO-luke`** entry before treating outputs as his own design.
+Luke must resolve every **`TODO-luke`** entry in `config.yaml` before running his real case.

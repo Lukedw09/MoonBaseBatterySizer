@@ -1,9 +1,10 @@
-# Lunar base battery + RTG thermal sizer — all numbers from here (see owner/source).
-# Run: python sizer.py config.yaml
+# Luke's design config — NO placeholder geometry or RTG coupling.
+# Run stops with "Luke needs to choose:" until TODO-luke fields are set.
+# For a runnable example: python sizer.py examples/example_config.yaml
 
 meta:
-  title: "NASA Moon Base Challenge — default sizing case"
-  mode: "solve_rtg"  # solve_rtg | fixed_rtg (uses rtg_thermal_w when fixed_rtg)
+  title: "NASA Moon Base Challenge — Luke's sizing inputs"
+  mode: "solve_rtg"  # solve_rtg | fixed_rtg
 
 loads:
   primary_w:
@@ -40,6 +41,11 @@ battery:
     units: dimensionless
     source: "Luke"
     owner: luke
+  eta_definition:
+    value: null
+    units: "round_trip | discharge"
+    source: "Controls Q_internal and discharge eta for pack sizing (sqrt(eta) if round_trip)"
+    owner: TODO-luke
   specific_energy_wh_per_kg_low:
     value: 150
     units: Wh/kg
@@ -48,12 +54,12 @@ battery:
   specific_energy_wh_per_kg_high:
     value: 200
     units: Wh/kg
-    source: "Same as low — upper end of requirement range"
+    source: "Upper end of Luke's pack-level requirement range"
     owner: luke
   packaging_insulation_mass_factor:
-    value: 1.0
+    value: null
     units: dimensionless
-    source: "Not chosen — placeholder multiplier on pack mass"
+    source: "Multiplier on pack mass (insulation/structure)"
     owner: TODO-luke
   bus_voltage_v:
     value: 1000
@@ -61,14 +67,24 @@ battery:
     source: "Luke — pack bus voltage (may change)"
     owner: luke
   cell_nominal_voltage_v:
-    value: 3.7
+    value: null
     units: V
-    source: "Typical Li-ion nominal — placeholder until Luke selects cell"
-    owner: cited-example
+    source: "Cell chemistry nominal — Luke to select and cite datasheet"
+    owner: TODO-luke
   cell_capacity_ah:
     value: null
     units: Ah
     source: "Unset — report pack-level only until Luke selects cell"
+    owner: TODO-luke
+  capacity_derating_factor_at_0c:
+    value: null
+    units: dimensionless
+    source: "Usable fraction of capacity at 0 C operating point"
+    owner: TODO-luke
+  minimum_charge_temperature_k:
+    value: null
+    units: K
+    source: "Minimum T before charge (lithium plating concern)"
     owner: TODO-luke
   box_target_temperature_k:
     value: 273.15
@@ -78,8 +94,13 @@ battery:
   lipo_cold_limit_k:
     value: 233
     units: K
-    source: "LiPo low-temperature limit (check only)"
+    source: "LiPo low-temperature limit (transient check)"
     owner: cited-example
+  pack_specific_heat_j_per_kgk:
+    value: null
+    units: J/kg-K
+    source: "Battery pack effective cp for transient check (e.g. ~1000 J/kg-K cited in handbooks)"
+    owner: TODO-luke
 
 thermal_environment:
   deep_space_sink_k:
@@ -92,71 +113,86 @@ thermal_environment:
     units: K
     source: "Luke — Diviner-equator night regolith surface"
     owner: luke
-  regolith_thermal_conductivity_w_per_mk:
+  regolith_k_surface_w_per_mk:
     value: 7.4e-4
     units: W/m-K
-    source: "Hayne et al. 2017 surface regolith"
+    source: "Hayne et al. 2017 Table A1 — near-surface"
+    owner: cited-example
+  regolith_k_depth_w_per_mk:
+    value: 3.4e-3
+    units: W/m-K
+    source: "Hayne et al. 2017 Table A1 — at ~6–7 cm depth scale"
+    owner: cited-example
+  regolith_scale_height_m:
+    value: 0.065
+    units: m
+    source: "Hayne et al. 2017 — representative gradient depth"
     owner: cited-example
   footpad_contact_conductance_w_per_m2k:
     value: 10
     units: W/m^2-K
-    source: "Okishio et al. 2015 ICES-2015-318 — cited example"
+    source: "Okishio et al. 2015 ICES-2015-318 (example contact conductance)"
     owner: cited-example
 
 geometry:
   n_battery_boxes:
-    value: 8
+    value: null
     units: count
-    source: "Ring layout — Luke to confirm count"
+    source: "Luke — ring layout"
     owner: TODO-luke
   box_length_m:
-    value: 1.0
+    value: null
     units: m
-    source: "Placeholder footprint"
+    source: "Luke — box tangential length"
     owner: TODO-luke
   box_width_m:
-    value: 0.8
+    value: null
     units: m
-    source: "Placeholder footprint"
+    source: "Luke — box radial width"
     owner: TODO-luke
   box_height_m:
-    value: 0.6
+    value: null
     units: m
-    source: "Placeholder height"
+    source: "Luke — box height"
     owner: TODO-luke
   ring_radius_m:
-    value: 3.0
+    value: null
     units: m
-    source: "Battery ring centerline radius from lander"
+    source: "Luke — ring centerline radius"
     owner: TODO-luke
-  view_factor_sky:
+  bottom_radiates_to:
+    value: null
+    units: "ground | lander_deck"
+    source: "Whether box bottom sees regolith or lander deck"
+    owner: TODO-luke
+  view_factor_sky_vertical:
     value: 0.5
     units: dimensionless
-    source: "Wohl et al. 2024 NASA/TM-20240003496 — vertical face example"
+    source: "Wohl et al. 2024 NASA/TM-20240003496 — vertical faces"
     owner: cited-example
-  view_factor_ground:
+  view_factor_ground_vertical:
     value: 0.5
     units: dimensionless
-    source: "Wohl et al. 2024 — complements sky on vertical faces"
-    owner: cited-example
-  top_area_fraction_sky:
-    value: 1.0
-    units: dimensionless
-    source: "Assume horizontal box tops see deep space for sizing"
+    source: "Wohl et al. 2024 — vertical faces"
     owner: cited-example
 
 radiation:
-  emittance_default:
+  box_effective_emittance:
     value: 0.02
     units: dimensionless
-    source: "Mid-range real MLI — Gilmore 2002 p.165 (0.015–0.030)"
+    source: "Gilmore 2002 Vol.1 p.165 — typical MLI range 0.015–0.030"
     owner: cited-example
+  penetration_seam_emittance_multiplier:
+    value: null
+    units: dimensionless
+    source: "Gilmore p.165 — higher effective e* with penetrations/seams on small blankets"
+    owner: TODO-luke
   emittance_sensitivity:
     - { value: 0.015, label: "MLI low (Gilmore)" }
-    - { value: 0.02, label: "MLI mid (default)" }
+    - { value: 0.02, label: "MLI mid" }
     - { value: 0.03, label: "MLI high (Gilmore)" }
     - { value: 0.0028, label: "LEMS-A3 (Rodriguez-Ruiz & Burbridge 2025)" }
-    - { value: 0.92, label: "Bare Z-93 paint (Kauder 2005)" }
+    - { value: 0.92, label: "Bare Z-93 (Kauder 2005)" }
     - { value: 0.03, label: "Polished Al (Kauder 2005)" }
 
 lander_legs:
@@ -168,51 +204,88 @@ lander_legs:
   leg_thermal_conductivity_w_per_mk:
     value: 6.7
     units: W/m-K
-    source: "Ti-6Al-4V — Colozza 2020 example"
+    source: "Ti-6Al-4V room-temperature k — tabulated in Colozza 2020"
+    owner: cited-example
+  use_temperature_dependent_k:
+    value: false
+    units: boolean
+    source: "If true, use simple linear k(T) mean (optional)"
     owner: cited-example
   leg_cross_section_m2:
-    value: 0.001
+    value: null
     units: m^2
-    source: "Hollow strut equivalent area — Colozza 2020 style example"
-    owner: cited-example
+    source: "Luke — leg conduction area"
+    owner: TODO-luke
   leg_length_m:
-    value: 1.0
+    value: null
     units: m
-    source: "Colozza 2020 example leg length"
-    owner: cited-example
+    source: "Luke — leg length"
+    owner: TODO-luke
+  leg_surface_emissivity:
+    value: null
+    units: dimensionless
+    source: "Luke — bare leg or MLI-wrapped effective emissivity"
+    owner: TODO-luke
   footpad_area_m2:
-    value: 0.05
+    value: null
     units: m^2
-    source: "Per-pad contact area — example"
+    source: "Luke — one footpad contact area (disk area for constriction R)"
+    owner: TODO-luke
+  leg_fin_segments:
+    value: 12
+    units: count
+    source: "Discretization nodes per leg for radiating fin (numerical)"
     owner: cited-example
   leg_material_sensitivity:
-    - name: "Ti-6Al-4V (default)"
+    - name: "Ti-6Al-4V k=6.7 (room T, Colozza table)"
       k_w_per_mk: 6.7
-    - name: "Low-k isolation (ULTEM/fiberglass — example)"
+    - name: "Low-k isolation example"
       k_w_per_mk: 0.25
 
 losses:
   passthrough_w:
-    value: 0
+    value: null
     units: W
-    source: "Wire passthroughs / seams — LEMS-A3 context; Luke to size"
+    source: "Wire passthroughs / heat switches / seams"
     owner: TODO-luke
-  rtg_to_battery_coupling:
-    value: 1.0
-    units: dimensionless
-    source: "Slusser 2023 — 100% RHU heat to vehicle (optimistic example)"
-    owner: cited-example
 
 rtg:
   count_list:
     value: [1, 2, 3, 4, 5, 6]
     units: count
-    source: "Luke — report thermal output per unit for these counts"
+    source: "Luke — report per-unit thermal for these counts"
     owner: luke
+  coupling_fraction:
+    value: null
+    units: dimensionless
+    source: "Fraction of RTG thermal that reaches battery boxes (NOT Slusser RHU-in-cavity)"
+    owner: TODO-luke
+  heat_path:
+    value: null
+    units: "radiative | heat_pipe | fluid_loop | conductive_mount"
+    source: "Luke — RTG-to-box heat transport mechanism"
+    owner: TODO-luke
+  inward_face_absorptance:
+    value: null
+    units: dimensionless
+    source: "For informational radiative coupling estimate only"
+    owner: TODO-luke
   thermal_output_w:
     value: null
     units: W
-    source: "Used only when mode = fixed_rtg"
+    source: "Required when mode = fixed_rtg"
+    owner: TODO-luke
+
+fallback:
+  mode:
+    value: null
+    units: "same_pack_survival | separate_pack"
+    source: "Survival uses same boxes vs scaled separate pack"
+    owner: TODO-luke
+  pack_volumetric_energy_density_wh_per_m3:
+    value: null
+    units: Wh/m^3
+    source: "For separate_pack — scale box volume from pack mass"
     owner: TODO-luke
 
 physics:

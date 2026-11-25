@@ -1,0 +1,289 @@
+# EXAMPLE ONLY — placeholder geometry and coupling, NOT Luke's design.
+# Used for tests, examples/report.pdf, and thermal model verification.
+
+meta:
+  title: "EXAMPLE ONLY — placeholder geometry, not Luke's design"
+  mode: "solve_rtg"
+
+loads:
+  primary_w:
+    value: 5000
+    units: W
+    source: "Luke — primary night electrical load"
+    owner: luke
+  survival_low_w:
+    value: 50
+    units: W
+    source: "Luke — survival load lower bound"
+    owner: luke
+  survival_high_w:
+    value: 100
+    units: W
+    source: "Luke — survival load upper bound"
+    owner: luke
+
+night:
+  t_dark_h:
+    value: 72
+    units: h
+    source: "Luke — CR1 best site lunar night duration"
+    owner: luke
+
+battery:
+  depth_of_discharge:
+    value: 0.8
+    units: dimensionless
+    source: "Luke"
+    owner: luke
+  round_trip_efficiency:
+    value: 0.9
+    units: dimensionless
+    source: "Luke"
+    owner: luke
+  eta_definition:
+    value: "round_trip"
+    units: "round_trip | discharge"
+    source: "Example — use round_trip until Luke chooses"
+    owner: cited-example
+  specific_energy_wh_per_kg_low:
+    value: 150
+    units: Wh/kg
+    source: "Colozza 2020; Slusser, Wilcox & Hernandez 2023; Reid & Bennett 2009 (pack level)"
+    owner: luke
+  specific_energy_wh_per_kg_high:
+    value: 200
+    units: Wh/kg
+    source: "Upper end of requirement range"
+    owner: luke
+  packaging_insulation_mass_factor:
+    value: 1.0
+    units: dimensionless
+    source: "EXAMPLE placeholder — not Luke's choice"
+    owner: cited-example
+  bus_voltage_v:
+    value: 1000
+    units: V
+    source: "Luke — pack bus voltage"
+    owner: luke
+  cell_nominal_voltage_v:
+    value: 3.7
+    units: V
+    source: "EXAMPLE Li-ion nominal — uncited until Luke picks cell"
+    owner: cited-example
+  cell_capacity_ah:
+    value: null
+    units: Ah
+    source: "Unset in example"
+    owner: TODO-luke
+  capacity_derating_factor_at_0c:
+    value: null
+    units: dimensionless
+    source: "Luke to set"
+    owner: TODO-luke
+  minimum_charge_temperature_k:
+    value: null
+    units: K
+    source: "Luke to set"
+    owner: TODO-luke
+  box_target_temperature_k:
+    value: 273.15
+    units: K
+    source: "Luke — hold battery box at 0 C"
+    owner: luke
+  lipo_cold_limit_k:
+    value: 233
+    units: K
+    source: "LiPo limit (check)"
+    owner: cited-example
+  pack_specific_heat_j_per_kgk:
+    value: 1000
+    units: J/kg-K
+    source: "Order-of-magnitude pack effective cp — handbook example"
+    owner: cited-example
+
+thermal_environment:
+  deep_space_sink_k:
+    value: 3
+    units: K
+    source: "Fixsen 2009 CMB"
+    owner: cited-example
+  night_surface_k:
+    value: 40
+    units: K
+    source: "Luke — Diviner night surface"
+    owner: luke
+  regolith_k_surface_w_per_mk:
+    value: 7.4e-4
+    units: W/m-K
+    source: "Hayne et al. 2017 Table A1 surface"
+    owner: cited-example
+  regolith_k_depth_w_per_mk:
+    value: 3.4e-3
+    units: W/m-K
+    source: "Hayne et al. 2017 Table A1 ~6-7 cm"
+    owner: cited-example
+  regolith_scale_height_m:
+    value: 0.065
+    units: m
+    source: "Hayne et al. 2017"
+    owner: cited-example
+  footpad_contact_conductance_w_per_m2k:
+    value: 10
+    units: W/m^2-K
+    source: "Okishio et al. 2015 ICES-2015-318"
+    owner: cited-example
+
+geometry:
+  n_battery_boxes:
+    value: 8
+    units: count
+    source: "EXAMPLE ring count"
+    owner: cited-example
+  box_length_m:
+    value: 1.0
+    units: m
+    source: "EXAMPLE"
+    owner: cited-example
+  box_width_m:
+    value: 0.8
+    units: m
+    source: "EXAMPLE"
+    owner: cited-example
+  box_height_m:
+    value: 0.6
+    units: m
+    source: "EXAMPLE"
+    owner: cited-example
+  ring_radius_m:
+    value: 3.0
+    units: m
+    source: "EXAMPLE"
+    owner: cited-example
+  bottom_radiates_to:
+    value: "ground"
+    units: string
+    source: "EXAMPLE — bottom to regolith"
+    owner: cited-example
+  view_factor_sky_vertical:
+    value: 0.5
+    units: dimensionless
+    source: "Wohl et al. 2024 NASA/TM-20240003496"
+    owner: cited-example
+  view_factor_ground_vertical:
+    value: 0.5
+    units: dimensionless
+    source: "Wohl et al. 2024"
+    owner: cited-example
+
+radiation:
+  box_effective_emittance:
+    value: 0.02
+    units: dimensionless
+    source: "Gilmore 2002 p.165 MLI mid"
+    owner: cited-example
+  penetration_seam_emittance_multiplier:
+    value: 1.0
+    units: dimensionless
+    source: "EXAMPLE no extra penalty"
+    owner: cited-example
+  emittance_sensitivity:
+    - { value: 0.015, label: "MLI low (Gilmore)" }
+    - { value: 0.02, label: "MLI mid" }
+    - { value: 0.03, label: "MLI high (Gilmore)" }
+
+lander_legs:
+  n_legs:
+    value: 4
+    units: count
+    source: "Luke"
+    owner: luke
+  leg_thermal_conductivity_w_per_mk:
+    value: 6.7
+    units: W/m-K
+    source: "Ti-6Al-4V room-T k — Colozza 2020 table"
+    owner: cited-example
+  use_temperature_dependent_k:
+    value: false
+    units: boolean
+    source: "Example off"
+    owner: cited-example
+  leg_cross_section_m2:
+    value: 0.001
+    units: m^2
+    source: "EXAMPLE conduction area"
+    owner: cited-example
+  leg_length_m:
+    value: 1.0
+    units: m
+    source: "EXAMPLE"
+    owner: cited-example
+  leg_surface_emissivity:
+    value: 0.9
+    units: dimensionless
+    source: "EXAMPLE bare Ti paint-equivalent"
+    owner: cited-example
+  footpad_area_m2:
+    value: 0.05
+    units: m^2
+    source: "EXAMPLE disk area"
+    owner: cited-example
+  leg_fin_segments:
+    value: 12
+    units: count
+    source: "Numerical discretization"
+    owner: cited-example
+  leg_material_sensitivity:
+    - name: "Ti-6Al-4V k=6.7"
+      k_w_per_mk: 6.7
+
+losses:
+  passthrough_w:
+    value: 0
+    units: W
+    source: "EXAMPLE"
+    owner: cited-example
+
+rtg:
+  count_list:
+    value: [1, 2, 3, 4, 5, 6]
+    units: count
+    source: "Luke"
+    owner: luke
+  coupling_fraction:
+    value: 0.35
+    units: dimensionless
+    source: "EXAMPLE guess for radiative ring coupling — Luke must choose"
+    owner: cited-example
+  heat_path:
+    value: "radiative"
+    units: string
+    source: "EXAMPLE"
+    owner: cited-example
+  inward_face_absorptance:
+    value: 0.8
+    units: dimensionless
+    source: "EXAMPLE for coupling helper"
+    owner: cited-example
+  thermal_output_w:
+    value: null
+    units: W
+    source: "fixed_rtg only"
+    owner: TODO-luke
+
+fallback:
+  mode:
+    value: null
+    units: string
+    source: "Report both branches until Luke chooses"
+    owner: TODO-luke
+  pack_volumetric_energy_density_wh_per_m3:
+    value: 250000
+    units: Wh/m^3
+    source: "EXAMPLE for separate_pack branch only"
+    owner: cited-example
+
+physics:
+  stefan_boltzmann_w_per_m2k4: 5.670374419e-8
+
+output:
+  report_pdf: "report.pdf"
