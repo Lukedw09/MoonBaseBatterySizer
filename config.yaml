@@ -39,12 +39,12 @@ battery:
   efficiency:
     value: 0.9
     units: dimensionless
-    source: "Luke — meaning set by eta_definition"
+    source: "Luke — whole discharge path: cells + DC-DC to 1 kV bus (used with eta_definition: discharge)"
     owner: luke
   eta_definition:
     value: discharge
     units: "round_trip | discharge"
-    source: "Luke — discharge-side efficiency for pack sizing and Q_internal = P_load*(1/η-1)"
+    source: "Luke — discharge η for pack sizing and Q_internal; η=0.9 is cells + DC-DC to 1 kV bus"
     owner: luke
   specific_energy_wh_per_kg_low:
     value: 150
@@ -273,10 +273,10 @@ wake_up:
 
 lander_legs:
   n_legs:
-    value: null
+    value: 4
     units: count
-    source: "Luke — leg count per pack lander"
-    owner: TODO-luke
+    source: "Luke — four legs per pack lander"
+    owner: luke
   leg_thermal_conductivity_w_per_mk:
     value: 6.7
     units: W/m-K
