@@ -529,6 +529,7 @@ def test_cold_shutdown_stuck_open_n8(example_cfg):
 
 
 def test_streamlit_app_gate_smoke():
+    pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
 
     root = Path(__file__).resolve().parent.parent

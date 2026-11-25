@@ -1205,7 +1205,7 @@ class CaseResult:
     load_name: str
     load_w: float
     specific_energy_wh_kg: float
-    fallback_branch: str
+    case: str
     battery: BatterySizing
     thermal: ThermalLoss
     q_internal_w: float
@@ -1497,7 +1497,7 @@ def solve_case(
         load_name=load_name,
         load_w=load_w,
         specific_energy_wh_kg=specific_energy,
-        fallback_branch=case_branch,
+        case=case_branch,
         battery=battery,
         thermal=thermal,
         q_internal_w=q_internal,
@@ -1632,7 +1632,7 @@ def solve_cold_shutdown_case(
         load_name="cold_shutdown_0W",
         load_w=0.0,
         specific_energy_wh_kg=primary.specific_energy_wh_kg,
-        fallback_branch="cold_shutdown",
+        case="cold_shutdown",
         battery=battery,
         thermal=thermal_hold,
         q_internal_w=q_internal,
@@ -1693,7 +1693,7 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
         lines.append("NOTE: RTG module disabled or coupling unset — per-pack radiators reject excess heat.")
     for r in results:
         lines.append(
-            f"\n--- {r.load_name} [{r.fallback_branch}] @ {r.specific_energy_wh_kg} Wh/kg "
+            f"\n--- {r.load_name} [{r.case}] @ {r.specific_energy_wh_kg} Wh/kg "
             f"(mode={r.mode}, iter={r.iterations}) ---"
         )
         b = r.battery
@@ -1751,9 +1751,9 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
             lines.append(f"  Q_RTG         — {r.q_rtg_message}")
         if r.radiative_coupling_info is not None:
             lines.append(f"  Info only: radiative coupling estimate ≈ {r.radiative_coupling_info:.4f}")
-        if r.transient_delta_t_k is not None and r.fallback_branch == "primary":
+        if r.transient_delta_t_k is not None and r.case == "primary":
             lines.append(f"  Transient ΔT (passive coast, no RTG) ≈ {r.transient_delta_t_k:.2f} K")
-        if r.fallback_branch == "cold_shutdown" and r.coast_t_final_k is not None:
+        if r.case == "cold_shutdown" and r.coast_t_final_k is not None:
             t0 = r.coast_t_final_k - (r.transient_delta_t_k or 0.0)
             lines.append(
                 f"  Cold shutdown coast: {t0:.2f} K → {r.coast_t_final_k:.2f} K over {r.battery.t_dark_h:.0f} h; "
@@ -1781,12 +1781,12 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
                 )
                 if r.dawn_warmup_note:
                     lines.append(f"  {r.dawn_warmup_note}")
-        if r.fallback_branch == "primary" and r.break_even_load_w is not None:
+        if r.case == "primary" and r.break_even_load_w is not None:
             lines.append(
                 f"  Part-load break-even (louvers closed): P_be ≈ {r.break_even_load_w/1000:.3f} kW fleet "
                 f"— below this, packs cool even with louvers shut"
             )
-        if r.fallback_branch == "cold_shutdown" and r.coast_margin_lipo_k is not None:
+        if r.case == "cold_shutdown" and r.coast_margin_lipo_k is not None:
             thr = lipo_margin_threshold_k(cfg) if cfg else None
             if thr is not None and r.cold_margin_alert:
                 lines.append(
@@ -1865,6 +1865,8 @@ def run_n_packs_sensitivity(
                 "cold_margin_k": margin_k,
                 "cold_stuck_margin_k": cs.coast_stuck_open_margin_lipo_k,
                 "margin_alert": margin_k is not None and thr is not None and margin_k < thr,
+                "stuck_margin_alert": cs.coast_stuck_open_margin_lipo_k is not None
+                and cs.coast_stuck_open_margin_lipo_k < 0,
                 "p_be_w": p_be,
             }
         )
@@ -1882,24 +1884,37 @@ def format_n_packs_table(rows: List[Dict[str, Any]], cfg: Optional[Dict[str, Any
     alert_hdr = "!" if thr is not None else "-"
     lines.append(
         f"{'n':>3} {'sys/kg':>7} {'Qloss_f':>8} {'Qexc_f':>8} {'Qleak_f':>7} {'Pbe/kW':>7} "
-        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf_c':>6} {'Tf_so':>6} {'dLiPo':>6} {'Warm_f':>7} {alert_hdr:>1}"
+        f"{'Arad_pp':>8} {'Radkg_pp':>8} {'Apan_pp':>8} {'Tf_c':>6} {'Tf_so':>6} {'dLiPo':>6} "
+        f"{'dLiPo_so':>7} {'Warm_f':>7} {alert_hdr:>1} {'*':>1}"
     )
     if thr is None and cfg is not None:
-        lines.append("(fleet W/kWh unless _pp = per pack; LiPo margin threshold unset)")
+        lines.append(
+            "(fleet W/kWh unless _pp = per pack; LiPo margin threshold unset; "
+            "* = stuck-open coast below LiPo limit)"
+        )
     else:
-        lines.append("(fleet W/kWh unless _pp = per pack; ! = margin below threshold when set)")
+        lines.append(
+            "(fleet W/kWh unless _pp = per pack; ! = margin below threshold; "
+            "* = stuck-open below LiPo limit)"
+        )
     for row in rows:
         tf = f"{row['cold_tf_k']:.1f}" if row["cold_tf_k"] is not None else "—"
         tf_so = f"{row['cold_tf_stuck_k']:.1f}" if row.get("cold_tf_stuck_k") is not None else "—"
         dm = f"{row['cold_margin_k']:.1f}" if row.get("cold_margin_k") is not None else "—"
+        dm_so = (
+            f"{row['cold_stuck_margin_k']:.1f}"
+            if row.get("cold_stuck_margin_k") is not None
+            else "—"
+        )
         wk = f"{row['warm_fleet_kwh']:.2f}" if row.get("warm_fleet_kwh") is not None else "—"
         flag = "!" if row.get("margin_alert") else ""
+        stuck = "*" if row.get("stuck_margin_alert") else ""
         lines.append(
             f"{row['n_packs']:3d} {row['system_mass_kg']:7.0f} "
             f"{row['q_loss_fleet_w']:8.1f} {row['q_excess_fleet_w']:8.1f} "
             f"{row['q_leak_fleet_w']:7.1f} {row['p_be_w']/1000:7.2f} "
             f"{row['rad_area_pp_m2']:8.3f} {row['rad_mass_pp_kg']:8.2f} "
-            f"{row['panel_pp_m2']:8.2f} {tf:>6} {tf_so:>6} {dm:>6} {wk:>7} {flag:>1}"
+            f"{row['panel_pp_m2']:8.2f} {tf:>6} {tf_so:>6} {dm:>6} {dm_so:>7} {wk:>7} {flag:>1}{stuck:>1}"
         )
     return "\n".join(lines)
 
@@ -1965,7 +1980,7 @@ def write_report_pdf(
         y = 0.98
         for r in results[:18]:
             block = (
-                f"{r.load_name}/{r.fallback_branch} @ {r.specific_energy_wh_kg} Wh/kg\n"
+                f"{r.load_name}/{r.case} @ {r.specific_energy_wh_kg} Wh/kg\n"
                 f" mass={r.battery.mass_kg:.0f}kg Q_int={r.q_internal_w:.0f}W Q_loss={r.thermal.q_total_w:.0f}W"
             )
             if r.q_rtg_total_w is not None:
@@ -1974,7 +1989,7 @@ def write_report_pdf(
                 block += f" EXCESS={r.q_excess_w:.0f}W"
             if r.transient_delta_t_k is not None:
                 block += f" dT={r.transient_delta_t_k:.1f}K"
-            if r.fallback_branch == "cold_shutdown" and r.coast_t_final_k is not None:
+            if r.case == "cold_shutdown" and r.coast_t_final_k is not None:
                 block += f" Tf_closed={r.coast_t_final_k:.1f}K"
                 if r.coast_stuck_open_t_final_k is not None:
                     block += f" Tf_stuck={r.coast_stuck_open_t_final_k:.1f}K"

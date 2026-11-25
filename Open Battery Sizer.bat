@@ -19,8 +19,15 @@ if not defined PY (
   exit /b 1
 )
 
+if exist ".venv" (
+  if not exist ".venv\Scripts\pip.exe" (
+    echo Removing incomplete .venv folder...
+    rmdir /s /q .venv
+  )
+)
+
 if not exist ".venv\Scripts\python.exe" (
-  echo Creating a local Python environment (.venv) — one-time setup...
+  echo Creating a local Python environment in .venv - one-time setup...
   %PY% -m venv .venv
   if errorlevel 1 (
     echo Failed to create .venv.
@@ -29,31 +36,20 @@ if not exist ".venv\Scripts\python.exe" (
   )
 )
 
-set "MARKER=.venv\.requirements-installed"
-set "NEED_PIP=0"
-if not exist "%MARKER%" set "NEED_PIP=1"
-if "%NEED_PIP%"=="0" (
-  for %%F in (requirements.txt) do set "REQ_TIME=%%~tF"
-  for %%F in ("%MARKER%") do set "MARK_TIME=%%~tF"
-  if "!REQ_TIME!" gtr "!MARK_TIME!" set "NEED_PIP=1"
-)
-if "%NEED_PIP%"=="1" (
-  echo Installing dependencies from requirements.txt...
-  call ".venv\Scripts\python.exe" -m pip install -q --upgrade pip
-  call ".venv\Scripts\pip.exe" install -r requirements.txt
-  if errorlevel 1 (
-    echo pip install failed.
-    pause
-    exit /b 1
-  )
-  copy /b nul "%MARKER%" >nul
+echo Installing or updating dependencies from requirements.txt...
+call ".venv\Scripts\python.exe" -m pip install -q --upgrade pip
+call ".venv\Scripts\pip.exe" install -q -r requirements.txt
+if errorlevel 1 (
+  echo pip install failed.
+  pause
+  exit /b 1
 )
 
 echo Starting Moon Base Battery Sizer in your browser...
 call ".venv\Scripts\streamlit.exe" run app.py
 if errorlevel 1 (
   echo.
-  echo The app stopped with an error (see message above).
+  echo The app stopped with an error - see message above.
   pause
   exit /b 1
 )

@@ -13,7 +13,7 @@ Python 3 tool for the **NASA Moon Base Challenge**: sizes **distributed lunar ni
 
 The first launch creates a local `.venv` folder and installs dependencies; later launches are faster. Your browser should open the sizer automatically. If anything fails, the launcher window stays open with a plain-English message (install Python 3 from [python.org](https://www.python.org/downloads/) if prompted).
 
-## Quick start (CLI — fallback)
+## Quick start (CLI)
 
 ```bash
 pip install -r requirements.txt
@@ -47,6 +47,8 @@ There is **no separate low-load survival case**; radiator **louvers or a passive
 - **Cold shutdown:** per-pack coast; **solar wake** panel (not pack discharge) provides warm-up power \(P_{\mathrm{wake}} = E_{\mathrm{warm}}/t_{\mathrm{wake}}\) over **`wake_up.warm_up_h`** (Luke: 6 h). Panel \(A = P/(1361\,\eta\,\cos\theta)\). Fleet wake energy and panel mass roll into **system mass**.
 
 ## Tests
+
+Install dependencies first (`pip install -r requirements.txt` or use a launcher). AppTest needs **streamlit** from that file.
 
 ```bash
 python3 -m pytest -q
