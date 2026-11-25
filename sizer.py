@@ -1939,6 +1939,59 @@ def run_sensitivity(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def render_n_pack_sweep_lines_on_figure(
+    fig,
+    sweep_lines: List[str],
+    *,
+    start_y: float = 0.98,
+    sweep_fs: float = 7.5,
+    dy: float = 0.0135,
+    x_frac: float = 0.06,
+) -> float:
+    """Draw monospace sweep lines using figure coords (full page width). Returns final y."""
+    y = start_y
+    for line in sweep_lines:
+        fig.text(
+            x_frac,
+            y,
+            line,
+            fontsize=sweep_fs,
+            family="monospace",
+            va="top",
+            transform=fig.transFigure,
+        )
+        y -= dy
+    return y
+
+
+def build_n_pack_sweep_figure(sweep_lines: List[str]):
+    """Build a single-page sweep figure (for tests and layout checks)."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8.5, 11))
+    ax.axis("off")
+    ax.set_position([0, 0, 1, 1])
+    render_n_pack_sweep_lines_on_figure(fig, sweep_lines)
+    return fig
+
+
+def figure_text_extents_px(fig) -> Tuple[float, List[Tuple[float, float, str]]]:
+    """Return (page_width_px, [(x0, x1, text), ...]) for all Text artists after draw."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    w_px = fig.get_figwidth() * fig.dpi
+    rows: List[Tuple[float, float, str]] = []
+    import matplotlib.text as mtext
+
+    for artist in fig.findobj(mtext.Text):
+        text = (artist.get_text() or "").strip()
+        if not text:
+            continue
+        bbox = artist.get_window_extent(renderer)
+        rows.append((float(bbox.x0), float(bbox.x1), artist.get_text() or ""))
+    return w_px, rows
+
+
 def write_report_pdf(
     path: Path,
     cfg: Dict[str, Any],
@@ -2027,19 +2080,29 @@ def write_report_pdf(
 
         if n_pack_rows:
             sweep_lines = format_n_packs_table(n_pack_rows, cfg).splitlines()
-            fig, ax = plt.subplots(figsize=(8.5, 11))
-            ax.axis("off")
-            y = 0.98
             sweep_fs = 7.5
             dy = 0.0135
+            fig, ax = plt.subplots(figsize=(8.5, 11))
+            ax.axis("off")
+            ax.set_position([0, 0, 1, 1])
+            y = 0.98
             for line in sweep_lines:
                 if y < 0.02:
                     pdf.savefig(fig)
                     plt.close(fig)
                     fig, ax = plt.subplots(figsize=(8.5, 11))
                     ax.axis("off")
+                    ax.set_position([0, 0, 1, 1])
                     y = 0.98
-                ax.text(0.06, y, line, fontsize=sweep_fs, family="monospace", va="top")
+                fig.text(
+                    0.06,
+                    y,
+                    line,
+                    fontsize=sweep_fs,
+                    family="monospace",
+                    va="top",
+                    transform=fig.transFigure,
+                )
                 y -= dy
             pdf.savefig(fig)
             plt.close(fig)

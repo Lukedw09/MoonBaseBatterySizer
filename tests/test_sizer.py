@@ -61,6 +61,9 @@ from sizer import (
     validate_for_run,
     write_report_pdf,
     todo_luke_list,
+    build_n_pack_sweep_figure,
+    figure_text_extents_px,
+    format_n_packs_table,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -552,8 +555,6 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     pytest.importorskip("pypdf")
     from pypdf import PdfReader
 
-    from sizer import format_n_packs_table
-
     results = run_all_cases(example_cfg)
     sens = run_n_packs_sensitivity(example_cfg, specific_energy=200, n_list=(1, 2, 4, 8, 16))
     table = format_n_packs_table(sens, example_cfg)
@@ -573,6 +574,23 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     for n in (1, 2, 4, 8):
         assert rows[n].endswith("*"), f"n={n} row missing trailing *: {rows[n]!r}"
     assert rows[16].endswith("!*"), f"n=16 row missing !*: {rows[16]!r}"
+    assert "BELOW LiPo limit" in text
+
+
+def test_report_pdf_sweep_text_fits_page_width(example_cfg):
+    import matplotlib.pyplot as plt
+
+    sens = run_n_packs_sensitivity(example_cfg, specific_energy=200, n_list=(1, 2, 4, 8, 16))
+    lines = format_n_packs_table(sens, example_cfg).splitlines()
+    fig = build_n_pack_sweep_figure(lines)
+    try:
+        w_px, extents = figure_text_extents_px(fig)
+        xmax = 0.95 * w_px
+        for x0, x1, _ in extents:
+            assert x0 >= 0.0, f"text starts off-page left: x0={x0}"
+            assert x1 <= xmax + 0.5, f"text exceeds 95%% page width: x1={x1} limit={xmax}"
+    finally:
+        plt.close(fig)
 
 
 def test_streamlit_app_gate_smoke():

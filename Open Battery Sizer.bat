@@ -9,7 +9,20 @@ cd /d "%~dp0" || (
 set "PY="
 where py >nul 2>&1 && py -3 --version >nul 2>&1 && set "PY=py -3"
 if not defined PY (
-  where python >nul 2>&1 && python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>nul && set "PY=python"
+  where python >nul 2>&1
+  if not errorlevel 1 (
+    python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 2)" 2>nul
+    if errorlevel 2 (
+      echo.
+      echo  This sizer needs Python 3.9 or newer.
+      echo  Download a current Python 3 at:
+      echo    https://www.python.org/downloads/
+      echo.
+      pause
+      exit /b 1
+    )
+    if not errorlevel 1 set "PY=python"
+  )
 )
 if not defined PY (
   echo.
@@ -18,17 +31,6 @@ if not defined PY (
   echo    https://www.python.org/downloads/
   echo.
   echo  During install on Windows, check "Add python.exe to PATH".
-  echo.
-  pause
-  exit /b 1
-)
-
-%PY% -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>nul
-if errorlevel 1 (
-  echo.
-  echo  This sizer needs Python 3.9 or newer.
-  echo  Download a current Python 3 at:
-  echo    https://www.python.org/downloads/
   echo.
   pause
   exit /b 1
