@@ -1,0 +1,353 @@
+# Luke's design config — NO placeholder geometry or RTG coupling.
+# Run stops with "Luke needs to choose:" until TODO-luke fields are set.
+# For a runnable example: python sizer.py examples/example_config.yaml
+
+meta:
+  title: "NASA Moon Base Challenge — Luke's sizing inputs"
+  mode: "solve_rtg"  # solve_rtg | fixed_rtg
+
+loads:
+  primary_w:
+    value: 5000
+    units: W
+    source: "Luke — primary night electrical load"
+    owner: luke
+night:
+  t_dark_h:
+    value: 72
+    units: h
+    source: "Luke — longest dark interval at the chosen CR1 site (CR1 illumination model). Program-level 'Night survival 120+ hours' in Requirements doc is the mission target; Luke chose 72 h for this site."
+    owner: luke
+
+battery:
+  depth_of_discharge:
+    value: 0.8
+    units: dimensionless
+    source: "Luke"
+    owner: luke
+  efficiency:
+    value: 0.9
+    units: dimensionless
+    source: "Luke — whole discharge path: cells + DC-DC to 1 kV bus (used with eta_definition: discharge)"
+    owner: luke
+  eta_definition:
+    value: discharge
+    units: "round_trip | discharge"
+    source: "Luke — discharge η for pack sizing and Q_internal; η=0.9 is cells + DC-DC to 1 kV bus"
+    owner: luke
+  specific_energy_wh_per_kg_low:
+    value: 150
+    units: Wh/kg
+    source: "Colozza 2020; Slusser, Wilcox & Hernandez 2023; Reid & Bennett 2009 (pack level)"
+    owner: luke
+  specific_energy_wh_per_kg_high:
+    value: 200
+    units: Wh/kg
+    source: "Upper end of Luke's pack-level requirement range"
+    owner: luke
+  packaging_insulation_mass_factor:
+    value: null
+    units: dimensionless
+    source: "Multiplier on pack mass (insulation/structure)"
+    owner: TODO-luke
+  bus_voltage_v:
+    value: 1000
+    units: V
+    source: "Luke — pack bus voltage (may change)"
+    owner: luke
+  cell_nominal_voltage_v:
+    value: null
+    units: V
+    source: "Cell chemistry nominal — Luke to select and cite datasheet"
+    owner: TODO-luke
+  cell_capacity_ah:
+    value: null
+    units: Ah
+    source: "Unset — report pack-level only until Luke selects cell"
+    owner: TODO-luke
+  capacity_derating_factor_at_0c:
+    value: null
+    units: dimensionless
+    source: "Usable fraction of capacity at 0 C operating point"
+    owner: TODO-luke
+  minimum_charge_temperature_k:
+    value: null
+    units: K
+    source: "Minimum T before charge (lithium plating concern)"
+    owner: TODO-luke
+  box_target_temperature_k:
+    value: 273.15
+    units: K
+    source: "Luke's choice — Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (273 K optimal hold temperature)"
+    owner: luke
+  lipo_cold_limit_k:
+    value: 233
+    units: K
+    source: "Luke's Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (sources listed there: Cold Electronics for Lunar Missions; Flight Battery Program 2010)"
+    owner: luke
+  pack_volumetric_energy_density_wh_per_m3:
+    value: null
+    units: Wh/m^3
+    source: "Luke — pack-level volumetric energy density for box sizing"
+    owner: TODO-luke
+  pack_specific_heat_j_per_kgk:
+    value: null
+    units: J/kg-K
+    source: "Battery pack effective cp for transient check (e.g. ~1000 J/kg-K cited in handbooks)"
+    owner: TODO-luke
+  lipo_margin_threshold_k:
+    value: null
+    units: K
+    source: "Luke — minimum acceptable LiPo margin at dawn after cold-shutdown coast"
+    owner: TODO-luke
+
+thermal_environment:
+  deep_space_sink_k:
+    value: 3
+    units: K
+    source: "Fixsen 2009 CMB"
+    owner: luke
+  night_surface_k:
+    value: 40
+    units: K
+    source: "Luke — Diviner polar night surface (Williams et al. 2019 JGR Planets; Schorghofer & Williams 2020 PSJ), per Requirements doc"
+    owner: luke
+  regolith_k_surface_w_per_mk:
+    value: 7.4e-4
+    units: W/m-K
+    source: "Hayne et al. 2017 Table A1 — near-surface"
+    owner: cited-example
+  regolith_k_depth_w_per_mk:
+    value: 3.4e-3
+    units: W/m-K
+    source: "Hayne et al. 2017 Table A1 — at ~6–7 cm depth scale"
+    owner: cited-example
+  footpad_contact_conductance_w_per_m2k:
+    value: 10
+    units: W/m^2-K
+    source: "Okishio et al. 2015 ICES-2015-318 (example contact conductance)"
+    owner: cited-example
+  lander_deck_temperature_k:
+    value: null
+    units: K
+    source: "Required when box bottom sees lander_deck (not T_box default)"
+    owner: TODO-luke
+
+layout:
+  model:
+    value: distributed_packs
+    units: string
+    source: "Luke — several smaller packs across the base (no central RTG deck)"
+    owner: luke
+
+geometry:
+  n_packs:
+    value: null
+    units: count
+    source: "Luke — number of physically separated pack/lander units"
+    owner: TODO-luke
+  scale_dims_with_n_packs:
+    value: true
+    units: boolean
+    source: "Per-pack box volume from V=(C/n)/ρ_vol vs reference aspect ratio"
+    owner: numerical
+  box_length_m:
+    value: null
+    units: m
+    source: "Luke — box tangential length"
+    owner: TODO-luke
+  box_width_m:
+    value: null
+    units: m
+    source: "Luke — box radial width"
+    owner: TODO-luke
+  box_height_m:
+    value: null
+    units: m
+    source: "Luke — box height"
+    owner: TODO-luke
+  ring_radius_m:
+    value: null
+    units: m
+    source: "Luke — ring centerline radius"
+    owner: TODO-luke
+  bottom_radiates_to:
+    value: null
+    units: "ground | lander_deck"
+    source: "Whether box bottom sees regolith or lander deck"
+    owner: TODO-luke
+  view_factor_sky_vertical:
+    value: 0.5
+    units: dimensionless
+    source: "Wohl et al. 2024 NASA/TM-20240003496 — vertical faces"
+    owner: cited-example
+  view_factor_ground_vertical:
+    value: 0.5
+    units: dimensionless
+    source: "Wohl et al. 2024 — vertical faces"
+    owner: cited-example
+
+radiation:
+  box_effective_emittance:
+    value: 0.02
+    units: dimensionless
+    source: "Gilmore 2002 Vol.1 p.165 — typical MLI range 0.015–0.030"
+    owner: cited-example
+  penetration_seam_emittance_multiplier:
+    value: null
+    units: dimensionless
+    source: "Gilmore p.165 — higher effective e* with penetrations/seams on small blankets"
+    owner: TODO-luke
+  emittance_sensitivity:
+    - { value: 0.015, label: "MLI low (Gilmore)" }
+    - { value: 0.02, label: "MLI mid" }
+    - { value: 0.03, label: "MLI high (Gilmore)" }
+    - { value: 0.0028, label: "LEMS-A3 (Rodriguez-Ruiz & Burbridge 2025)" }
+    - { value: 0.92, label: "Bare Z-93 (Kauder 2005)" }
+    - { value: 0.03, label: "Polished Al (Kauder 2005)" }
+
+radiator:
+  radiator_emissivity:
+    value: null
+    units: dimensionless
+    source: "Radiator surface ε (e.g. Z-93)"
+    owner: TODO-luke
+  radiator_temperature_k:
+    value: null
+    units: K
+    source: "Passive radiator temperature (must be ≤ box_target_temperature_k)"
+    owner: TODO-luke
+  radiator_areal_mass_kg_per_m2:
+    value: null
+    units: kg/m^2
+    source: "Full deployed radiator areal mass"
+    owner: TODO-luke
+  louver_area_multiplier:
+    value: null
+    units: dimensionless
+    source: "Louver area factor on bare fin area (Colozza Table 16)"
+    owner: TODO-luke
+  radiator_closed_emissivity:
+    value: null
+    units: dimensionless
+    source: "Closed louver / valve-off effective ε for night leak"
+    owner: TODO-luke
+
+wake_up:
+  warm_up_h:
+    value: 6
+    units: h
+    source: "Luke — dawn warm-up duration before charging"
+    owner: luke
+  solar_constant_w_per_m2:
+    value: 1361
+    units: W/m^2
+    source: "AM0 solar constant"
+    owner: cited-example
+  panel_efficiency:
+    value: null
+    units: dimensionless
+    source: "Luke — wake panel η at CR1 dawn"
+    owner: TODO-luke
+  sun_incidence_cosine:
+    value: null
+    units: dimensionless
+    source: "Luke — cos(incidence) at CR1 dawn"
+    owner: TODO-luke
+  panel_areal_mass_kg_per_m2:
+    value: null
+    units: kg/m^2
+    source: "Luke — wake array areal mass"
+    owner: TODO-luke
+
+lander_legs:
+  n_legs:
+    value: 4
+    units: count
+    source: "Luke — four legs per pack lander"
+    owner: luke
+  leg_thermal_conductivity_w_per_mk:
+    value: 6.7
+    units: W/m-K
+    source: "Ti-6Al-4V room-temperature k — tabulated in Colozza 2020"
+    owner: cited-example
+  leg_cross_section_m2:
+    value: null
+    units: m^2
+    source: "Luke — leg conduction area"
+    owner: TODO-luke
+  leg_length_m:
+    value: null
+    units: m
+    source: "Luke — leg length"
+    owner: TODO-luke
+  leg_surface_emissivity:
+    value: null
+    units: dimensionless
+    source: "Luke — bare leg or MLI-wrapped effective emissivity"
+    owner: TODO-luke
+  footpad_area_m2:
+    value: null
+    units: m^2
+    source: "Luke — one footpad contact area (disk area for constriction R)"
+    owner: TODO-luke
+  leg_perimeter_m:
+    value: null
+    units: m
+    source: "Luke — wetted leg perimeter (tube/hollow strut)"
+    owner: TODO-luke
+  leg_fin_segments:
+    value: 12
+    units: count
+    source: "BVP initial mesh node count (numerical)"
+    owner: numerical
+  leg_material_sensitivity:
+    - name: "Ti-6Al-4V k=6.7 (room T, Colozza table)"
+      k_w_per_mk: 6.7
+    - name: "Low-k isolation example"
+      k_w_per_mk: 0.25
+
+losses:
+  passthrough_w:
+    value: null
+    units: W
+    source: "Wire passthroughs / heat switches / seams"
+    owner: TODO-luke
+
+rtg:
+  enabled:
+    value: false
+    units: boolean
+    source: "Luke layout — no RTG; optional legacy module"
+    owner: luke
+  count_list:
+    value: [1, 2, 3, 4, 5, 6]
+    units: count
+    source: "Luke — report per-unit thermal for these counts"
+    owner: luke
+  coupling_fraction:
+    value: null
+    units: dimensionless
+    source: "Fraction of RTG thermal that reaches battery boxes (NOT Slusser RHU-in-cavity)"
+    owner: TODO-luke
+  heat_path:
+    value: null
+    units: "radiative | heat_pipe | fluid_loop | conductive_mount"
+    source: "Luke — RTG-to-box heat transport mechanism"
+    owner: TODO-luke
+  inward_face_absorptance:
+    value: null
+    units: dimensionless
+    source: "For informational radiative coupling estimate only"
+    owner: TODO-luke
+  thermal_output_w:
+    value: null
+    units: W
+    source: "Required when mode = fixed_rtg"
+    owner: TODO-luke
+
+physics:
+  stefan_boltzmann_w_per_m2k4: 5.670374419e-8
+
+output:
+  report_pdf: "report.pdf"

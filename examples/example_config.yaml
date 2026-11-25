@@ -1,0 +1,336 @@
+# EXAMPLE ONLY — placeholder geometry and coupling, NOT Luke's design.
+# Used for tests, examples/report.pdf, and thermal model verification.
+
+meta:
+  title: "EXAMPLE ONLY — distributed packs + radiators (not Luke's final geometry)"
+  mode: "solve_rtg"
+
+layout:
+  model:
+    value: distributed_packs
+    units: string
+    source: "Luke — several smaller packs across base, no central RTG deck"
+    owner: luke
+
+loads:
+  primary_w:
+    value: 5000
+    units: W
+    source: "Luke — primary night electrical load"
+    owner: luke
+night:
+  t_dark_h:
+    value: 72
+    units: h
+    source: "Luke — longest dark interval at the chosen CR1 site (CR1 illumination model). Program-level 'Night survival 120+ hours' in Requirements doc is the mission target; Luke chose 72 h for this site."
+    owner: luke
+
+battery:
+  depth_of_discharge:
+    value: 0.8
+    units: dimensionless
+    source: "Luke"
+    owner: luke
+  efficiency:
+    value: 0.9
+    units: dimensionless
+    source: "Luke — whole discharge path: cells + DC-DC to 1 kV bus (used with eta_definition: discharge)"
+    owner: luke
+  eta_definition:
+    value: discharge
+    units: "round_trip | discharge"
+    source: "Luke — discharge η for pack sizing and Q_internal; η=0.9 is cells + DC-DC to 1 kV bus"
+    owner: luke
+  specific_energy_wh_per_kg_low:
+    value: 150
+    units: Wh/kg
+    source: "Colozza 2020; Slusser, Wilcox & Hernandez 2023; Reid & Bennett 2009 (pack level)"
+    owner: luke
+  specific_energy_wh_per_kg_high:
+    value: 200
+    units: Wh/kg
+    source: "Upper end of requirement range"
+    owner: luke
+  packaging_insulation_mass_factor:
+    value: 1.0
+    units: dimensionless
+    source: "EXAMPLE placeholder — not Luke's choice"
+    owner: placeholder
+  bus_voltage_v:
+    value: 1000
+    units: V
+    source: "Luke — pack bus voltage"
+    owner: luke
+  cell_nominal_voltage_v:
+    value: 3.7
+    units: V
+    source: "EXAMPLE Li-ion nominal — uncited until Luke picks cell"
+    owner: placeholder
+  cell_capacity_ah:
+    value: null
+    units: Ah
+    source: "Unset in example"
+    owner: TODO-luke
+  capacity_derating_factor_at_0c:
+    value: null
+    units: dimensionless
+    source: "Luke to set"
+    owner: TODO-luke
+  minimum_charge_temperature_k:
+    value: null
+    units: K
+    source: "Luke to set"
+    owner: TODO-luke
+  box_target_temperature_k:
+    value: 273.15
+    units: K
+    source: "Luke's choice — Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (273 K optimal hold temperature)"
+    owner: luke
+  lipo_cold_limit_k:
+    value: 233
+    units: K
+    source: "Luke's Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (sources listed there: Cold Electronics for Lunar Missions; Flight Battery Program 2010)"
+    owner: luke
+  pack_specific_heat_j_per_kgk:
+    value: 1000
+    units: J/kg-K
+    source: "EXAMPLE pack effective cp — not from Luke's data"
+    owner: placeholder
+  pack_volumetric_energy_density_wh_per_m3:
+    value: 250000
+    units: Wh/m^3
+    source: "EXAMPLE pack-level ~250 kWh/m³ (250000 Wh/m³) — order of advanced Li-ion pack placeholder; Luke to confirm"
+    owner: placeholder
+  lipo_margin_threshold_k:
+    value: 10
+    units: K
+    source: "EXAMPLE minimum LiPo margin at dawn cold-shutdown coast (Luke may change)"
+    owner: placeholder
+
+thermal_environment:
+  deep_space_sink_k:
+    value: 3
+    units: K
+    source: "Fixsen 2009 CMB"
+    owner: luke
+  night_surface_k:
+    value: 40
+    units: K
+    source: "Luke — Diviner polar night surface (Williams et al. 2019 JGR Planets; Schorghofer & Williams 2020 PSJ), per Requirements doc"
+    owner: luke
+  regolith_k_surface_w_per_mk:
+    value: 7.4e-4
+    units: W/m-K
+    source: "Hayne et al. 2017 Table A1 surface"
+    owner: cited-example
+  regolith_k_depth_w_per_mk:
+    value: 3.4e-3
+    units: W/m-K
+    source: "Hayne et al. 2017 Table A1 ~6-7 cm"
+    owner: cited-example
+  footpad_contact_conductance_w_per_m2k:
+    value: 10
+    units: W/m^2-K
+    source: "Okishio et al. 2015 ICES-2015-318"
+    owner: cited-example
+  lander_deck_temperature_k:
+    value: null
+    units: K
+    source: "Required if bottom_radiates_to=lander_deck"
+    owner: TODO-luke
+
+geometry:
+  n_packs:
+    value: 8
+    units: count
+    source: "EXAMPLE — number of physically separated pack/lander units"
+    owner: placeholder
+  scale_dims_with_n_packs:
+    value: true
+    units: boolean
+    source: "When true, L/W/H scaled from pack volume V=(C/n)/ρ_vol vs reference aspect ratio"
+    owner: numerical
+  box_length_m:
+    value: 1.0
+    units: m
+    source: "EXAMPLE"
+    owner: placeholder
+  box_width_m:
+    value: 0.8
+    units: m
+    source: "EXAMPLE"
+    owner: placeholder
+  box_height_m:
+    value: 0.6
+    units: m
+    source: "EXAMPLE"
+    owner: placeholder
+  view_factor_sky_vertical:
+    value: 0.5
+    units: dimensionless
+    source: "Wohl et al. 2024 NASA/TM-20240003496"
+    owner: cited-example
+  view_factor_ground_vertical:
+    value: 0.5
+    units: dimensionless
+    source: "Wohl et al. 2024"
+    owner: cited-example
+
+radiator:
+  radiator_emissivity:
+    value: 0.92
+    units: dimensionless
+    source: "Z-93 example (Kauder 2005)"
+    owner: cited-example
+  radiator_temperature_k:
+    value: 273.15
+    units: K
+    source: "Passive radiator — equal to box hold T (TODO-luke); cannot exceed box without heat pump"
+    owner: placeholder
+  radiator_areal_mass_kg_per_m2:
+    value: 12.3
+    units: kg/m^2
+    source: "Colozza 2020 Table 17 — full louvered radiator areal mass (deployed area)"
+    owner: cited-example
+  radiator_closed_emissivity:
+    value: 0.08
+    units: dimensionless
+    source: "EXAMPLE closed-louver effective ε — VIPER valve context (Bluethmann 2024 p.13)"
+    owner: placeholder
+  louver_area_multiplier:
+    value: 1.3
+    units: dimensionless
+    source: "Colozza 2020 — louvered +30% area vs bare"
+    owner: cited-example
+wake_up:
+  warm_up_h:
+    value: 6
+    units: h
+    source: "Luke — warm-up interval after dawn (solar wake before pack charge allowed)"
+    owner: luke
+  solar_constant_w_per_m2:
+    value: 1361
+    units: W/m^2
+    source: "NASA AM0 solar constant (typical engineering value)"
+    owner: cited-example
+  panel_efficiency:
+    value: 0.28
+    units: dimensionless
+    source: "EXAMPLE multi-junction / deployed array placeholder at CR1"
+    owner: placeholder
+  sun_incidence_cosine:
+    value: 0.35
+    units: dimensionless
+    source: "EXAMPLE polar dawn cos(incidence); Luke to set from CR1 elevation — often near-vertical panel"
+    owner: placeholder
+  panel_areal_mass_kg_per_m2:
+    value: 2.5
+    units: kg/m^2
+    source: "EXAMPLE thin deployable array placeholder (uncited)"
+    owner: placeholder
+
+radiation:
+  box_effective_emittance:
+    value: 0.02
+    units: dimensionless
+    source: "Gilmore 2002 p.165 MLI mid"
+    owner: cited-example
+  penetration_seam_emittance_multiplier:
+    value: 1.0
+    units: dimensionless
+    source: "EXAMPLE no extra penalty"
+    owner: placeholder
+  emittance_sensitivity:
+    - { value: 0.015, label: "MLI low (Gilmore)" }
+    - { value: 0.02, label: "MLI mid" }
+    - { value: 0.03, label: "MLI high (Gilmore)" }
+
+lander_legs:
+  n_legs:
+    value: 4
+    units: count
+    source: "Luke — four legs per pack lander"
+    owner: luke
+  leg_thermal_conductivity_w_per_mk:
+    value: 6.7
+    units: W/m-K
+    source: "Ti-6Al-4V room-T k — Colozza 2020 table"
+    owner: cited-example
+  leg_cross_section_m2:
+    value: 0.001
+    units: m^2
+    source: "EXAMPLE conduction area"
+    owner: placeholder
+  leg_length_m:
+    value: 1.0
+    units: m
+    source: "EXAMPLE"
+    owner: placeholder
+  leg_perimeter_m:
+    value: 0.126
+    units: m
+    source: "EXAMPLE solid-square placeholder (4*sqrt(A_cross) until Luke picks tube perimeter)"
+    owner: placeholder
+  leg_surface_emissivity:
+    value: 0.9
+    units: dimensionless
+    source: "EXAMPLE painted metal finish (not bare Ti)"
+    owner: placeholder
+  footpad_area_m2:
+    value: 0.05
+    units: m^2
+    source: "EXAMPLE disk area"
+    owner: placeholder
+  leg_fin_segments:
+    value: 50
+    units: count
+    source: "BVP initial mesh node count"
+    owner: numerical
+  leg_material_sensitivity:
+    - name: "Ti-6Al-4V k=6.7"
+      k_w_per_mk: 6.7
+
+losses:
+  passthrough_w:
+    value: 0
+    units: W
+    source: "EXAMPLE"
+    owner: placeholder
+
+rtg:
+  enabled:
+    value: false
+    units: boolean
+    source: "Luke layout has no RTG — optional legacy module"
+    owner: luke
+  count_list:
+    value: [1, 2, 3, 4, 5, 6]
+    units: count
+    source: "Luke"
+    owner: luke
+  coupling_fraction:
+    value: 0.034
+    units: dimensionless
+    source: "EXAMPLE ≈ radiative helper (0.034); heat pipe/fluid loop would raise — Luke must choose"
+    owner: placeholder
+  heat_path:
+    value: "radiative"
+    units: string
+    source: "EXAMPLE placeholder"
+    owner: placeholder
+  inward_face_absorptance:
+    value: 0.8
+    units: dimensionless
+    source: "EXAMPLE for radiative coupling helper only"
+    owner: placeholder
+  thermal_output_w:
+    value: null
+    units: W
+    source: "fixed_rtg only"
+    owner: TODO-luke
+
+physics:
+  stefan_boltzmann_w_per_m2k4: 5.670374419e-8
+
+output:
+  report_pdf: "report.pdf"
