@@ -2030,8 +2030,8 @@ def write_report_pdf(
             fig, ax = plt.subplots(figsize=(8.5, 11))
             ax.axis("off")
             y = 0.98
-            sweep_fs = 4.0
-            dy = 0.0165
+            sweep_fs = 7.5
+            dy = 0.0135
             for line in sweep_lines:
                 if y < 0.02:
                     pdf.savefig(fig)
@@ -2039,7 +2039,7 @@ def write_report_pdf(
                     fig, ax = plt.subplots(figsize=(8.5, 11))
                     ax.axis("off")
                     y = 0.98
-                ax.text(0.01, y, line, fontsize=sweep_fs, family="monospace", va="top")
+                ax.text(0.06, y, line, fontsize=sweep_fs, family="monospace", va="top")
                 y -= dy
             pdf.savefig(fig)
             plt.close(fig)

@@ -9,7 +9,7 @@ cd /d "%~dp0" || (
 set "PY="
 where py >nul 2>&1 && py -3 --version >nul 2>&1 && set "PY=py -3"
 if not defined PY (
-  where python >nul 2>&1 && python -c "import sys; raise SystemExit(0 if sys.version_info[:1] == (3,) else 1)" 2>nul && set "PY=python"
+  where python >nul 2>&1 && python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)" 2>nul && set "PY=python"
 )
 if not defined PY (
   echo.

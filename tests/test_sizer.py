@@ -530,6 +530,24 @@ def test_cold_shutdown_stuck_open_n8(example_cfg):
     assert cs.louvers_stuck_below_lipo is True
 
 
+def _pdf_sweep_rows_by_n(pdf_text: str) -> dict[int, str]:
+    """Map n_packs (1,2,4,8,16) to the extracted PDF line for that sweep row."""
+    want = {1, 2, 4, 8, 16}
+    found: dict[int, str] = {}
+    for line in pdf_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        head = stripped.split(None, 1)[0]
+        try:
+            n = int(head)
+        except ValueError:
+            continue
+        if n in want:
+            found[n] = stripped
+    return found
+
+
 def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     pytest.importorskip("pypdf")
     from pypdf import PdfReader
@@ -549,10 +567,12 @@ def test_report_pdf_sweep_includes_dLiPo_so_and_flags(example_cfg, tmp_path):
     write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg), n_pack_rows=sens)
     text = "\n".join((page.extract_text() or "") for page in PdfReader(pdf).pages)
     assert "dLiPo_so" in text
-    assert "stuck-open below LiPo" in text or "stuck-open" in text
-    assert "!" in text
-    assert "*" in text
-    assert "BELOW LiPo limit" in text
+    assert "stuck-open below LiPo" in text
+    rows = _pdf_sweep_rows_by_n(text)
+    assert set(rows) == {1, 2, 4, 8, 16}
+    for n in (1, 2, 4, 8):
+        assert rows[n].endswith("*"), f"n={n} row missing trailing *: {rows[n]!r}"
+    assert rows[16].endswith("!*"), f"n=16 row missing !*: {rows[16]!r}"
 
 
 def test_streamlit_app_gate_smoke():
