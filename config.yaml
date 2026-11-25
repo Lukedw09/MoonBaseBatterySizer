@@ -96,6 +96,11 @@ battery:
     units: K
     source: "Luke's Moon Base Requirements & Numbers doc, row 'LiPo cold limit: 233 K, 273 K optimal' (sources listed there: Cold Electronics for Lunar Missions; Flight Battery Program 2010)"
     owner: luke
+  pack_volumetric_energy_density_wh_per_m3:
+    value: null
+    units: Wh/m^3
+    source: "Luke — pack-level volumetric energy density for box sizing"
+    owner: TODO-luke
   pack_specific_heat_j_per_kgk:
     value: null
     units: J/kg-K
@@ -155,8 +160,8 @@ geometry:
   scale_dims_with_n_packs:
     value: true
     units: boolean
-    source: "Per-pack box volume ∝ fleet capacity / n_packs"
-    owner: luke
+    source: "Per-pack box volume from V=(C/n)/ρ_vol vs reference aspect ratio"
+    owner: numerical
   box_length_m:
     value: null
     units: m
@@ -212,12 +217,66 @@ radiation:
     - { value: 0.92, label: "Bare Z-93 (Kauder 2005)" }
     - { value: 0.03, label: "Polished Al (Kauder 2005)" }
 
+radiator:
+  radiator_emissivity:
+    value: null
+    units: dimensionless
+    source: "Radiator surface ε (e.g. Z-93)"
+    owner: TODO-luke
+  radiator_temperature_k:
+    value: null
+    units: K
+    source: "Passive radiator temperature (must be ≤ box_target_temperature_k)"
+    owner: TODO-luke
+  radiator_areal_mass_kg_per_m2:
+    value: null
+    units: kg/m^2
+    source: "Full deployed radiator areal mass"
+    owner: TODO-luke
+  louver_area_multiplier:
+    value: null
+    units: dimensionless
+    source: "Louver area factor on bare fin area (Colozza Table 16)"
+    owner: TODO-luke
+  radiator_closed_emissivity:
+    value: null
+    units: dimensionless
+    source: "Closed louver / valve-off effective ε for night leak"
+    owner: TODO-luke
+
+wake_up:
+  warm_up_h:
+    value: 6
+    units: h
+    source: "Luke — dawn warm-up duration before charging"
+    owner: luke
+  solar_constant_w_per_m2:
+    value: 1361
+    units: W/m^2
+    source: "AM0 solar constant"
+    owner: cited-example
+  panel_efficiency:
+    value: null
+    units: dimensionless
+    source: "Luke — wake panel η at CR1 dawn"
+    owner: TODO-luke
+  sun_incidence_cosine:
+    value: null
+    units: dimensionless
+    source: "Luke — cos(incidence) at CR1 dawn"
+    owner: TODO-luke
+  panel_areal_mass_kg_per_m2:
+    value: null
+    units: kg/m^2
+    source: "Luke — wake array areal mass"
+    owner: TODO-luke
+
 lander_legs:
   n_legs:
-    value: 4
+    value: null
     units: count
-    source: "Luke"
-    owner: luke
+    source: "Luke — leg count per pack lander"
+    owner: TODO-luke
   leg_thermal_conductivity_w_per_mk:
     value: 6.7
     units: W/m-K

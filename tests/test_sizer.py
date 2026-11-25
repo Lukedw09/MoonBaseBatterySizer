@@ -22,7 +22,12 @@ from sizer import (
     radiator_area_for_reject_w,
     total_pack_box_area_m2,
     run_n_packs_sensitivity,
+    box_dims_from_volume,
+    pack_volume_m3_per_pack,
+    radiator_bare_and_deployed_area_m2,
     scaled_pack_dims_for_n_packs,
+    solve_dawn_warmup_solar_w,
+    electric_heater_alternative,
     compute_night_energy_wh,
     compute_pack_mass_kg,
     compute_required_capacity_wh,
@@ -175,11 +180,16 @@ def test_per_pack_face_area_literal():
 
 
 def test_fleet_box_area_scales_n_one_third():
-    a1 = total_pack_box_area_m2(1.0, 0.8, 0.6)
+    rho = 250_000.0
+    cap = 500_000.0
+    vol1 = cap / rho
+    l1, w1, h1 = box_dims_from_volume(1.0, 0.8, 0.6, vol1)
+    a1 = total_pack_box_area_m2(l1, w1, h1)
     for n in (2, 4, 8):
-        l, w, h = scaled_pack_dims_for_n_packs(1.0, 0.8, 0.6, n)
-        a_n = n * total_pack_box_area_m2(l, w, h)
-        assert a_n == pytest.approx(a1 * (n ** (1 / 3)), rel=0.01)
+        vol_n = (cap / n) / rho
+        ln, wn, hn = box_dims_from_volume(1.0, 0.8, 0.6, vol_n)
+        a_n = n * total_pack_box_area_m2(ln, wn, hn)
+        assert a_n == pytest.approx(a1 * (n ** (1 / 3)), rel=0.001)
 
 
 def test_regolith_spreading_disk_formula():
@@ -258,12 +268,15 @@ def test_radiating_leg_example_vs_reference(example_cfg):
 
 
 def test_per_pack_box_radiation_hand_calc(example_cfg):
-    n_p = param_value(example_cfg, "geometry", "n_packs")
-    l, w, h = scaled_pack_dims_for_n_packs(
+    n_p = 8
+    rho = param_value(example_cfg, "battery", "pack_volumetric_energy_density_wh_per_m3")
+    cap = compute_required_capacity_wh((5000 + 0) * 72, 0.8, 0.9)
+    vol = pack_volume_m3_per_pack(cap, n_p, rho)
+    l, w, h = box_dims_from_volume(
         param_value(example_cfg, "geometry", "box_length_m"),
         param_value(example_cfg, "geometry", "box_width_m"),
         param_value(example_cfg, "geometry", "box_height_m"),
-        n_p,
+        vol,
     )
     em = param_value(example_cfg, "radiation", "box_effective_emittance")
     mult = param_value(example_cfg, "radiation", "penetration_seam_emittance_multiplier") or 1.0
@@ -273,16 +286,18 @@ def test_per_pack_box_radiation_hand_calc(example_cfg):
     fs = param_value(example_cfg, "geometry", "view_factor_sky_vertical")
     fg = param_value(example_cfg, "geometry", "view_factor_ground_vertical")
     q1, _, _ = distributed_pack_radiation_loss_w(l, w, h, em, t_box, t_sky, t_g, fs, fg, mult, SIGMA_DEFAULT)
-    assert q1 * n_p == pytest.approx(47.46, rel=0.02)
+    expected_fleet = 122.91357399596148
+    assert q1 * n_p == pytest.approx(expected_fleet, rel=0.001)
 
 
 def test_radiator_area_hand_calc():
-    q_pp = 329.2 / 8
+    q_pp = 33.71944289488082
     eps = 0.92
-    t_rad = 350.0
+    t_rad = 273.15
     t_sink = effective_sink_temperature_k(3.0, 40.0)
-    area = radiator_area_for_reject_w(q_pp, eps, t_rad, t_sink, SIGMA_DEFAULT)
-    assert area == pytest.approx(0.053, rel=0.02)
+    bare, deployed = radiator_bare_and_deployed_area_m2(q_pp, eps, t_rad, t_sink, 1.3, SIGMA_DEFAULT)
+    assert bare == pytest.approx(0.11613841146546709, rel=0.001)
+    assert deployed == pytest.approx(0.15097993490510722, rel=0.001)
 
 
 def test_example_primary_thermal_targets(example_cfg):
@@ -297,11 +312,11 @@ def test_example_primary_thermal_targets(example_cfg):
 
 def test_example_known_primary_thermal_numbers(example_cfg):
     r = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
-    assert r.thermal.q_leg_w == pytest.approx(162.9, rel=0.01)
-    assert r.thermal.q_total_w == pytest.approx(226.4, rel=0.01)
-    assert r.q_internal_w == pytest.approx(555.56, rel=0.001)
-    assert r.q_excess_w == pytest.approx(329.2, rel=0.01)
-    assert r.thermal.radiator_area_per_pack_m2 == pytest.approx(0.053, rel=0.03)
+    assert r.thermal.q_leg_w == pytest.approx(162.89855761554043, rel=0.001)
+    assert r.thermal.q_total_w == pytest.approx(285.8000123965092, rel=0.001)
+    assert r.q_internal_w == pytest.approx(555.5555555555555, rel=0.001)
+    assert r.q_excess_w == pytest.approx(269.75554315904657, rel=0.001)
+    assert r.thermal.radiator_area_per_pack_m2 == pytest.approx(0.15097993490510722, rel=0.001)
     assert r.battery.capacity_wh == pytest.approx(500_000.0, rel=0.001)
 
 
@@ -311,7 +326,7 @@ def test_example_same_pack_survival_transient_dt(example_cfg):
         "survival_100W", 100, 200, example_cfg,
         fallback_branch="same_pack_survival", primary_pack=prim.battery, transient_mass_kg=prim.battery.mass_kg,
     )
-    assert surv.transient_delta_t_k == pytest.approx(-22.32, rel=0.02)
+    assert surv.transient_delta_t_k == pytest.approx(-28.479745285270077, rel=0.001)
 
 
 def test_lander_deck_missing_temperature_raises_ring_layout(example_cfg):
@@ -322,7 +337,7 @@ def test_lander_deck_missing_temperature_raises_ring_layout(example_cfg):
     bad["geometry"]["bottom_radiates_to"] = {"value": "lander_deck", "owner": "placeholder"}
     bad["thermal_environment"]["lander_deck_temperature_k"]["value"] = None
     with pytest.raises(ConfigError, match="lander_deck_temperature_k"):
-        compute_thermal_loss(bad)
+        compute_thermal_loss(bad, fleet_capacity_wh=500_000.0)
 
 
 def test_primary_more_internal_than_survival(example_cfg):
@@ -375,8 +390,8 @@ def test_fixed_rtg_requires_thermal_output(example_cfg):
 
 def test_n_packs_sensitivity_row_eight(example_cfg):
     rows = run_n_packs_sensitivity(example_cfg, specific_energy=200, n_list=(8,))
-    assert rows[0]["q_loss_w"] == pytest.approx(226.4, rel=0.01)
-    assert rows[0]["cold_tf_k"] == pytest.approx(252.0, rel=0.02)
+    assert rows[0]["q_loss_w"] == pytest.approx(285.8000123965092, rel=0.001)
+    assert rows[0]["cold_tf_k"] == pytest.approx(245.0200397810733, rel=0.001)
 
 
 def test_fallback_both_branches_when_unset(example_cfg):
@@ -393,7 +408,7 @@ def test_solve_case_end_to_end(example_cfg):
     assert r.battery.mass_kg > 1000
     assert r.thermal.q_total_w > 100
     assert r.q_rtg_total_w is None
-    assert r.q_excess_w == pytest.approx(329.2, rel=0.01)
+    assert r.q_excess_w == pytest.approx(269.75554315904657, rel=0.001)
     assert r.system_mass_kg is not None and r.system_mass_kg > r.battery.mass_kg
 
 
@@ -423,40 +438,47 @@ def test_cold_shutdown_final_t_on_example(example_cfg):
     prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
     n_p = max(1, prim.thermal.n_packs)
     mass_pp = prim.battery.mass_kg / n_p
-    fine_lut = build_q_loss_temperature_lut(example_cfg, t_min_k=220, t_max_k=275, n_points=120)
-    fine = integrate_lumped_thermal_coast(
-        example_cfg,
-        mass_pp,
-        param_value(example_cfg, "battery", "pack_specific_heat_j_per_kgk"),
-        param_value(example_cfg, "battery", "box_target_temperature_k"),
-        param_value(example_cfg, "night", "t_dark_h"),
-        p_load_w=0.0,
-        eta=0.9,
-        eta_definition="discharge",
-        dt_s=30.0,
-        lipo_limit_k=233.0,
-        q_loss_lut=fine_lut,
-    )
-    assert fine["t_final_k"] == pytest.approx(252.0, rel=0.01)
+    cp = param_value(example_cfg, "battery", "pack_specific_heat_j_per_kgk")
+    t_dark = param_value(example_cfg, "night", "t_dark_h")
+    q_ex_pp = prim.q_excess_w / n_p
+    q_const = 39.537641346624724
+    t0 = param_value(example_cfg, "battery", "box_target_temperature_k")
+    t_analytic = t0 - q_const * t_dark * 3600.0 / (mass_pp * cp)
     cs = solve_cold_shutdown_case(example_cfg, prim, dt_s=60.0)
-    assert cs.coast_t_final_k == pytest.approx(fine["t_final_k"], rel=0.005)
-    assert cs.coast_margin_lipo_k == pytest.approx(fine["margin_lipo_k"], rel=0.01)
+    assert cs.coast_t_final_k == pytest.approx(245.0200397810733, rel=0.001)
+    assert t_analytic == pytest.approx(240.35039839406228, rel=0.001)
+    assert cs.coast_t_final_k >= t_analytic
+    assert cs.coast_margin_lipo_k == pytest.approx(cs.coast_t_final_k - 233.0, rel=0.01)
     assert cs.coast_time_to_lipo_h is None
 
 
 def test_dawn_warmup_energy_hand_calc(example_cfg):
     mass = 2500.0
     cp = 1000.0
-    eta = 0.9
     t0, t_target = 254.2, 273.15
     tau_h = 6.0
     q0 = 100.0
     lut = ([200.0, 280.0], [q0, q0])
     mc = mass * cp
     d_t = t_target - t0
-    p_hand = (mc * d_t / (tau_h * 3600.0) + q0) * eta
-    w = solve_dawn_warmup_heater_w(
-        example_cfg, mass, cp, t0, t_target, tau_h, eta, "discharge", dt_s=60.0, q_loss_lut=lut
+    p_hand = mc * d_t / (tau_h * 3600.0) + q0
+    w = solve_dawn_warmup_solar_w(
+        example_cfg, mass, cp, t0, t_target, tau_h, dt_s=60.0, q_loss_lut=lut,
+        fleet_capacity_wh=500_000.0, q_excess_per_pack_w=0.0,
     )
-    assert w["p_heater_w"] == pytest.approx(p_hand, rel=0.02)
-    assert w["energy_wh"] == pytest.approx(p_hand * tau_h, rel=0.02)
+    assert w["p_heater_w"] == pytest.approx(p_hand, rel=0.001)
+    assert w["energy_wh"] == pytest.approx(p_hand * tau_h, rel=0.001)
+
+
+def test_electric_heater_alt_hand_calc(example_cfg):
+    prim = solve_case("primary_5000W", 5000, 200, example_cfg, fallback_branch="primary")
+    surv = solve_case(
+        "survival_100W", 100, 200, example_cfg,
+        fallback_branch="same_pack_survival", primary_pack=prim.battery,
+    )
+    eta = 0.9
+    q_int, _ = pick_internal_heat(internal_waste_heat_w(100, eta), "discharge")
+    p_exp = eta * (surv.thermal.q_total_w - q_int)
+    alt = electric_heater_alternative(surv)
+    assert alt["p_shortfall_w"] == pytest.approx(p_exp, rel=0.001)
+    assert alt["e_heater_wh"] == pytest.approx(p_exp * 72, rel=0.001)

@@ -107,10 +107,10 @@ battery:
     units: J/kg-K
     source: "EXAMPLE pack effective cp — not from Luke's data"
     owner: placeholder
-  dawn_warm_up_h:
-    value: 6
-    units: h
-    source: "EXAMPLE placeholder — time to restore box/charge temperature after night (Luke to confirm)"
+  pack_volumetric_energy_density_wh_per_m3:
+    value: 250000
+    units: Wh/m^3
+    source: "EXAMPLE pack-level ~250 kWh/m³ (250000 Wh/m³) — order of advanced Li-ion pack placeholder; Luke to confirm"
     owner: placeholder
 
 thermal_environment:
@@ -149,12 +149,12 @@ geometry:
   n_packs:
     value: 8
     units: count
-    source: "Luke — number of physically separated pack/lander units"
+    source: "EXAMPLE — number of physically separated pack/lander units"
     owner: placeholder
   scale_dims_with_n_packs:
     value: true
     units: boolean
-    source: "Volume per pack ∝ fleet capacity / n_packs → linear scale n^(-1/3)"
+    source: "When true, L/W/H scaled from pack volume V=(C/n)/ρ_vol vs reference aspect ratio"
     owner: numerical
   box_length_m:
     value: 1.0
@@ -189,24 +189,50 @@ radiator:
     source: "Z-93 example (Kauder 2005)"
     owner: cited-example
   radiator_temperature_k:
-    value: 350
+    value: 273.15
     units: K
-    source: "EXAMPLE reject temperature — Luke to choose"
+    source: "Passive radiator — equal to box hold T (TODO-luke); cannot exceed box without heat pump"
     owner: placeholder
   radiator_areal_mass_kg_per_m2:
-    value: 4.5
+    value: 12.3
     units: kg/m^2
-    source: "Colozza 2020 Table 17 louvered radiator"
+    source: "Colozza 2020 Table 17 — full louvered radiator areal mass (deployed area)"
     owner: cited-example
+  radiator_closed_emissivity:
+    value: 0.08
+    units: dimensionless
+    source: "EXAMPLE closed-louver effective ε — VIPER valve context (Bluethmann 2024 p.13)"
+    owner: placeholder
   louver_area_multiplier:
     value: 1.3
     units: dimensionless
     source: "Colozza 2020 — louvered +30% area vs bare"
     owner: cited-example
-  radiator_night_leak_w_per_pack:
-    value: 2.0
-    units: W
-    source: "EXAMPLE closed radiator / heat-pipe off — see VIPER control valve (Bluethmann 2024 p.13)"
+wake_up:
+  warm_up_h:
+    value: 6
+    units: h
+    source: "Luke — warm-up interval after dawn (solar wake before pack charge allowed)"
+    owner: luke
+  solar_constant_w_per_m2:
+    value: 1361
+    units: W/m^2
+    source: "NASA AM0 solar constant (typical engineering value)"
+    owner: cited-example
+  panel_efficiency:
+    value: 0.28
+    units: dimensionless
+    source: "EXAMPLE multi-junction / deployed array placeholder at CR1"
+    owner: placeholder
+  sun_incidence_cosine:
+    value: 0.35
+    units: dimensionless
+    source: "EXAMPLE polar dawn cos(incidence); Luke to set from CR1 elevation — often near-vertical panel"
+    owner: placeholder
+  panel_areal_mass_kg_per_m2:
+    value: 2.5
+    units: kg/m^2
+    source: "EXAMPLE thin deployable array placeholder (uncited)"
     owner: placeholder
 
 radiation:
@@ -229,8 +255,8 @@ lander_legs:
   n_legs:
     value: 4
     units: count
-    source: "Luke"
-    owner: luke
+    source: "EXAMPLE — on some legs (Luke to choose count)"
+    owner: placeholder
   leg_thermal_conductivity_w_per_mk:
     value: 6.7
     units: W/m-K
