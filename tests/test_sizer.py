@@ -65,11 +65,14 @@ from sizer import (
     placeholder_list,
     layout_unused_input_messages,
     n_packs_leg_mesh_config_error,
+    _PDF_RESULTS_BLOCK_DY,
+    _pdf_results_page_next_y,
     todo_luke_list,
     figure_text_extents_pdf_scaled,
     figure_text_extents_px,
     format_n_packs_table,
     SWEEP_PDF_PAGE_LABEL,
+    RESULTS_PDF_PAGE_LABEL,
     SWEEP_PDF_GLYPH_WIDTH_SCALE,
     sweep_pdf_glyph_width_scale,
     N_PACK_SWEEP_FONT_SIZE,
@@ -638,7 +641,8 @@ def test_distributed_layout_notes_in_pdf_and_not_blockers(example_cfg, tmp_path)
     luke = load_config(LUKE_CFG)
     luke_notes = layout_unused_input_messages(luke)
     assert any("bottom_radiates_to" in n for n in luke_notes)
-    assert any("ring_radius_m" in n for n in luke_notes)
+    assert any("ring_radius_m" in n and "not used by distributed_packs layout" in n for n in luke_notes)
+    assert not any("ring_radius_m" in n and "bottom to ground" in n for n in luke_notes)
     assert len(design_blockers(luke)) == 20
     results = run_all_cases(example_cfg)
     pdf = tmp_path / "layout_notes.pdf"
@@ -655,28 +659,20 @@ def test_distributed_layout_notes_in_pdf_and_not_blockers(example_cfg, tmp_path)
         {"leg_length_m": 50.0, "leg_cross_section_m2": 1e-7},
     ],
 )
-def test_leg_bvp_bad_geometry_not_n_packs_mesh_message(example_cfg, leg_overrides):
+def test_leg_bvp_bad_geometry_user_facing_config_error(example_cfg, leg_overrides):
     cfg = copy.deepcopy(example_cfg)
     cfg["geometry"]["n_packs"]["value"] = 8
     for key, val in leg_overrides.items():
         cfg["lander_legs"][key]["value"] = val
-    validate_for_run(cfg)
-    with pytest.raises(FinSolverError):
-        run_all_cases(cfg)
-
-
-def test_leg_bvp_bad_geometry_config_error_wording(example_cfg):
-    cfg = copy.deepcopy(example_cfg)
-    cfg["geometry"]["n_packs"]["value"] = 8
-    cfg["lander_legs"]["leg_length_m"]["value"] = 1000.0
-    cfg["lander_legs"]["leg_cross_section_m2"]["value"] = 1e-6
     validate_for_run(cfg)
     try:
         run_all_cases(cfg)
     except FinSolverError as e:
         msg = str(n_packs_leg_mesh_config_error(cfg, e))
         assert "Leg thermal BVP did not converge" in msg
-        assert "n_packs too large for leg thermal mesh" not in msg
+        assert "did not converge" in msg
+        assert "n_packs too large" not in msg
+        assert "n_packs=8" in msg
     else:
         pytest.fail("expected FinSolverError")
 
@@ -690,8 +686,124 @@ def test_n_packs_249_still_uses_n_packs_mesh_message(example_cfg):
     except FinSolverError as e:
         msg = str(n_packs_leg_mesh_config_error(cfg, e))
         assert "n_packs too large for leg thermal mesh" in msg
+        assert "n_packs=249" in msg
+        assert "check leg geometry/units" not in msg
     else:
         pytest.fail("expected FinSolverError")
+
+
+def test_cli_blocked_prints_layout_ignored_notes(capsys):
+    from sizer import main
+
+    assert main([str(LUKE_CFG)]) == 2
+    out = capsys.readouterr().out
+    assert "layout (ignored by current layout model)" in out
+    assert "bottom_radiates_to" in out
+
+
+def test_ring_rtg_layout_requires_ring_radius_and_n_battery_boxes(example_cfg):
+    cfg = copy.deepcopy(example_cfg)
+    cfg["layout"]["model"]["value"] = "ring_rtg"
+    cfg["geometry"]["ring_radius_m"] = {
+        "value": None,
+        "units": "m",
+        "source": "Luke — ring centerline radius",
+        "owner": "TODO-luke",
+    }
+    cfg["geometry"]["n_battery_boxes"] = {
+        "value": None,
+        "units": "count",
+        "source": "Luke — boxes on ring",
+        "owner": "TODO-luke",
+    }
+    missing = design_blockers(cfg)
+    assert "geometry.ring_radius_m (required for ring_rtg layout)" in missing
+    assert "geometry.n_battery_boxes (required for ring_rtg layout)" in missing
+    with pytest.raises(DesignInputError):
+        validate_for_run(cfg)
+
+
+def test_pdf_results_page_next_y_respects_tall_blocks():
+    y_top = 0.98
+    y_after = 0.72
+    assert _pdf_results_page_next_y(y_after, y_top) == pytest.approx(0.72, abs=1e-6)
+    y_after_short = 0.94
+    assert _pdf_results_page_next_y(y_after_short, y_top) == pytest.approx(
+        y_top - _PDF_RESULTS_BLOCK_DY, abs=1e-6
+    )
+
+
+def _results_page_text_ymin_ymax(fig) -> List[Tuple[float, float, str]]:
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    import matplotlib.text as mtext
+
+    if fig.canvas is None or not hasattr(fig.canvas, "get_renderer"):
+        FigureCanvasAgg(fig)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    rows: List[Tuple[float, float, str]] = []
+    for artist in fig.findobj(mtext.Text):
+        text = (artist.get_text() or "").strip()
+        if not text:
+            continue
+        bbox = artist.get_window_extent(renderer)
+        rows.append((float(bbox.y0), float(bbox.y1), text))
+    return rows
+
+
+def test_report_pdf_long_result_blocks_do_not_overlap(example_cfg, tmp_path, monkeypatch):
+    import matplotlib.pyplot as plt
+    import sizer
+
+    captured_figs: list = []
+    orig_block = sizer._pdf_format_result_block
+    first = [True]
+
+    def padded_block(r):
+        base = orig_block(r)
+        if first[0]:
+            first[0] = False
+            return base + "\n" + "\n".join(f"pad-line-{i}: Q_int=000W Q_loss=000W" for i in range(10))
+        return base
+
+    class _CapturingPdfPages:
+        def __init__(self, path, *args, **kwargs):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def savefig(self, fig, *args, **kwargs):
+            captured_figs.append(fig)
+
+    monkeypatch.setattr(sizer, "_pdf_format_result_block", padded_block)
+    monkeypatch.setattr("matplotlib.backends.backend_pdf.PdfPages", _CapturingPdfPages)
+
+    results = run_all_cases(example_cfg)
+    write_report_pdf(tmp_path / "overlap.pdf", example_cfg, results, [], todo_luke_list(example_cfg))
+    results_figs = [f for f in captured_figs if f.get_label() == RESULTS_PDF_PAGE_LABEL]
+    assert results_figs, "missing results page figure"
+    results_fig = results_figs[0]
+    try:
+        rows = _results_page_text_ymin_ymax(results_fig)
+        headers = [r for r in rows if "@" in r[2] and "Wh/kg" in r[2]]
+        headers.sort(key=lambda t: t[1], reverse=True)
+        assert len(headers) >= 2
+        h0_y0, h0_y1, h0_text = headers[0]
+        h1_y0, h1_y1, _ = headers[1]
+        block0_lines = [
+            r for r in rows if r[2] in h0_text or r[2].startswith("pad-line-") or h0_text.splitlines()[0] in r[2]
+        ]
+        block0_low = min(y0 for y0, _y1, _ in block0_lines)
+        assert h1_y1 <= block0_low + 2.0, (
+            f"result blocks overlap (block2 top ymax={h1_y1}, block1 bottom ymin={block0_low})"
+        )
+    finally:
+        for fig in captured_figs:
+            plt.close(fig)
 
 
 def test_n_packs_249_leg_mesh_raises_config_error(example_cfg):

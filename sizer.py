@@ -22,6 +22,7 @@ N_PACK_SWEEP_LINE_DY = 0.0135
 N_PACK_SWEEP_FONT_SIZE = 7.5
 N_PACK_SWEEP_X_FRAC = 0.06
 SWEEP_PDF_PAGE_LABEL = "moonbase_n_pack_sweep"
+RESULTS_PDF_PAGE_LABEL = "moonbase_results"
 N_PACK_SWEEP_FIGURE_DPI = 100.0
 
 
@@ -162,6 +163,11 @@ def blocking_missing(cfg: Dict[str, Any]) -> List[str]:
         if row["path"] == "rtg.thermal_output_w" and mode != "fixed_rtg":
             continue
         missing.append(f"{row['path']} ({row['source']})")
+    if layout_model(cfg) == "ring_rtg":
+        if param_value(cfg, "geometry", "ring_radius_m") is None:
+            missing.append("geometry.ring_radius_m (required for ring_rtg layout)")
+        if param_value(cfg, "geometry", "n_battery_boxes") is None:
+            missing.append("geometry.n_battery_boxes (required for ring_rtg layout)")
     return sorted(set(missing))
 
 
@@ -204,7 +210,9 @@ def layout_unused_input_note(cfg: Dict[str, Any], path: str) -> Optional[str]:
     """Explain geometry fields ignored by the active layout model (not sizing blockers)."""
     model = layout_model(cfg)
     if model == "distributed_packs":
-        if path in ("geometry.bottom_radiates_to", "geometry.ring_radius_m"):
+        if path == "geometry.ring_radius_m":
+            return "not used by distributed_packs layout"
+        if path == "geometry.bottom_radiates_to":
             return "not used by distributed_packs layout (bottom to ground)"
         if path == "thermal_environment.lander_deck_temperature_k":
             return "not used by distributed_packs layout (bottom to ground)"
@@ -2084,6 +2092,11 @@ def _pdf_notes_continuation(
 
 
 _PDF_BODY_TEXT_WIDTH = 95
+_PDF_RESULTS_BLOCK_DY = 0.075
+
+
+def _pdf_results_page_next_y(y_after_block: float, y_block_top: float) -> float:
+    return min(y_after_block, y_block_top - _PDF_RESULTS_BLOCK_DY)
 
 
 def _pdf_draw_wrapped_text_block(
@@ -2158,6 +2171,11 @@ def _pdf_format_result_block(r: "CaseResult") -> str:
     return block
 
 
+# Heuristic limits for FinSolver user-facing messages only (unsourced; no effect on thermal math).
+LEG_BVP_NPACKS_MSG_MAX_LEG_LENGTH_M = 5.0
+LEG_BVP_NPACKS_MSG_MIN_LEG_AREA_M2 = 1e-5
+
+
 def fin_solver_error_is_n_packs_mesh_limit(cfg: Dict[str, Any], err: FinSolverError) -> bool:
     """Max mesh-node failures from high pack count with otherwise plausible leg geometry."""
     if "maximum number of mesh nodes" not in str(err).lower():
@@ -2166,7 +2184,9 @@ def fin_solver_error_is_n_packs_mesh_limit(cfg: Dict[str, Any], err: FinSolverEr
     a_cross = param_value(cfg, "lander_legs", "leg_cross_section_m2")
     if leg_len is None or a_cross is None:
         return False
-    if float(leg_len) > 5.0 or float(a_cross) < 1e-5:
+    if float(leg_len) > LEG_BVP_NPACKS_MSG_MAX_LEG_LENGTH_M:
+        return False
+    if float(a_cross) < LEG_BVP_NPACKS_MSG_MIN_LEG_AREA_M2:
         return False
     return True
 
@@ -2254,9 +2274,9 @@ def write_report_pdf(
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(8.5, 11))
+        fig.set_label(RESULTS_PDF_PAGE_LABEL)
         ax.axis("off")
         y = 0.98
-        _RESULTS_BLOCK_DY = 0.075
         for block in (_pdf_format_result_block(r) for r in results):
             fig, ax, y = _pdf_notes_continuation(pdf, fig, ax, y)
             y_top = y
@@ -2271,7 +2291,7 @@ def write_report_pdf(
                 wrap_width=_PDF_BODY_TEXT_WIDTH,
                 family="monospace",
             )
-            y = y_top - _RESULTS_BLOCK_DY
+            y = _pdf_results_page_next_y(y, y_top)
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -2333,6 +2353,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         validate_for_run(cfg)
     except DesignInputError as e:
+        layout_notes = layout_unused_input_messages(cfg)
+        if layout_notes:
+            print("\n--- layout (ignored by current layout model) ---")
+            for line in layout_notes:
+                print(f"  • {line}")
         print("Luke needs to choose (required before run):")
         for m in e.missing:
             print(f"  • {m}")
