@@ -40,7 +40,6 @@ TUNING_PANEL_MIN_WIDTH = 520
 SCALE_LENGTH = 190
 AUTO_SIZING_DEBOUNCE_MS = 600
 SCALE_KEY_DEBOUNCE_MS = 300
-SHUTDOWN_JOIN_TIMEOUT_S = 10.0
 ACCENT_COLOR = "#0d9488"
 HEADER_BG = "#0f172a"
 HEADER_FG = "#f8fafc"
@@ -226,7 +225,7 @@ def metrics_from_case_results(
         "Excess heat": (f"{primary.q_excess_w:.1f} W", plbl, "normal"),
         "ΔT coast": (f"{dt:.2f} K" if dt is not None else "—", plbl, "normal"),
     }
-    margin_thr = 6.0
+    margin_thr: Optional[float] = None
     if cfg is not None:
         thr = param_value(cfg, "battery", "lipo_margin_threshold_k")
         if thr is not None:
@@ -246,7 +245,12 @@ def metrics_from_case_results(
                 min_stuck = is_stuck
                 min_lbl = _margin_case_subtitle(r, stuck_open=is_stuck)
     if min_margin is not None:
-        tone = "warn" if min_margin < 0 else ("amber" if min_margin < margin_thr else "normal")
+        if min_margin < 0:
+            tone = "warn"
+        elif margin_thr is not None and min_margin < margin_thr:
+            tone = "amber"
+        else:
+            tone = "normal"
         out["Min temp margin"] = (f"{min_margin:.2f} K", min_lbl, tone)
     else:
         out["Min temp margin"] = ("—", "", "normal")
@@ -764,19 +768,6 @@ class SizerGUI:
             self._poll_after_id = None
         self._sizing_generation += 1
         self._sizing_pending = False
-        deadline = time.time() + SHUTDOWN_JOIN_TIMEOUT_S
-        while time.time() < deadline:
-            self._poll_sizing_queue()
-            for thread in list(self._worker_threads):
-                if thread.is_alive():
-                    thread.join(timeout=0.05)
-            self._prune_worker_threads()
-            if not self._worker_threads and self._sizing_inflight == 0 and self._sizing_queue.empty():
-                break
-            try:
-                self.root.update()
-            except tk.TclError:
-                break
         try:
             self.root.quit()
         except tk.TclError:
@@ -1030,11 +1021,13 @@ class SizerGUI:
             self._results_fresh = False
         self._update_pdf_button_state()
 
-    def _update_pdf_button_state(self) -> None:
-        waiting_for_current = self._sizing_pending or (
+    def _waiting_for_current_sizing(self) -> bool:
+        return self._sizing_pending or (
             self._sizing_inflight > 0 and self._last_display_generation != self._sizing_generation
         )
-        if waiting_for_current:
+
+    def _update_pdf_button_state(self) -> None:
+        if self._waiting_for_current_sizing():
             self.pdf_btn.configure(state=tk.DISABLED)
         elif self._results_fresh and self.last_working_cfg is not None:
             self.pdf_btn.configure(state=tk.NORMAL)
@@ -1166,8 +1159,7 @@ class SizerGUI:
 
     def save_pdf(self) -> None:
         if (
-            self._sizing_active
-            or self._sizing_pending
+            self._waiting_for_current_sizing()
             or not self._results_fresh
             or self.last_working_cfg is None
             or self.last_results is None

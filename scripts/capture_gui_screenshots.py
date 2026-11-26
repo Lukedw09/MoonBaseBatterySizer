@@ -72,13 +72,13 @@ def main() -> None:
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=True)
     _prime_window(root, app)
     _wait_results(app, root)
-    digests["a"] = _grab_png(root, ARTIFACTS / "r32-example-after-auto-update.png")
+    digests["a"] = _grab_png(root, ARTIFACTS / "r33-example-after-auto-update.png")
     root.destroy()
 
     root = tk.Tk()
     app_b = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
     _prime_window(root, app_b)
-    digests["b"] = _grab_png(root, ARTIFACTS / "r32-luke-blocked.png")
+    digests["b"] = _grab_png(root, ARTIFACTS / "r33-luke-blocked.png")
     root.destroy()
 
     gate.clear()
@@ -93,7 +93,7 @@ def main() -> None:
     for _ in range(30):
         root.update()
         time.sleep(0.05)
-    digests["c"] = _grab_png(root, ARTIFACTS / "r32-mid-update.png")
+    digests["c"] = _grab_png(root, ARTIFACTS / "r33-mid-update.png")
     gate.set()
     _wait_results(app_c, root)
     gui.run_sizing_report = _real_report

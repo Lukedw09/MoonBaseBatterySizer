@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Subprocess probe: close window during sizing update; must exit 0."""
+"""Subprocess probe: WM_DELETE_WINDOW during sizing update; must exit 0."""
 
 from __future__ import annotations
 
@@ -29,17 +29,25 @@ def _slow_report(base_cfg, controls):
 gui.run_sizing_report = _slow_report
 
 
+def _trigger_wm_delete_window(root) -> None:
+    cmd = root.tk.call("wm", "protocol", root._w, "WM_DELETE_WINDOW")
+    if cmd:
+        root.tk.call("eval", cmd)
+
+
 def main() -> None:
     import tkinter as tk
 
     root = tk.Tk()
+    root.geometry("900x700+0+0")
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
+    root.update_idletasks()
     root.update()
     app._start_sizing_run()
 
     def _close_soon() -> None:
         root.update_idletasks()
-        app._request_close()
+        _trigger_wm_delete_window(root)
 
     root.after(250, _close_soon)
     root.mainloop()

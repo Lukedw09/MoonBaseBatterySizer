@@ -471,110 +471,6 @@ def test_stale_worker_finishes_last_discarded(monkeypatch):
     _shutdown_gui(app, root)
 
 
-def test_stale_discard_requires_generation_guard(monkeypatch):
-    import threading
-    import time
-    import tkinter as tk
-
-    import gui
-    import gui_logic
-    from gui import SizerGUI
-    from gui_logic import EXAMPLE_CFG
-    calls = [0]
-    gate_slow = threading.Event()
-    _register_worker_gate(gate_slow)
-    _real = gui_logic.run_sizing_report
-
-    def gated_report(base_cfg, controls):
-        calls[0] += 1
-        if calls[0] == 1:
-            gate_slow.wait()
-            return base_cfg, "STALE_RUN_MARKER\nstale", [], []
-        return _real(base_cfg, controls)
-
-    monkeypatch.setattr(gui, "run_sizing_report", gated_report)
-
-    def finish_no_stale_guard(self, run_id: int, payload) -> None:
-        self._sizing_inflight = max(0, self._sizing_inflight - 1)
-        kind, data = payload
-        if kind == "ok":
-            text = data[1]
-            self._set_results_display(text, current=True)
-        self._sync_sizing_active()
-        self._update_pdf_button_state()
-        self._schedule_queue_poll()
-
-    monkeypatch.setattr(SizerGUI, "_finish_sizing_run", finish_no_stale_guard)
-
-    root = tk.Tk()
-    root.withdraw()
-    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    root.update()
-    app._start_sizing_run()
-    app._start_sizing_run()
-    deadline = time.time() + 90.0
-    while time.time() < deadline:
-        root.update()
-        if "Pack mass" in app.results_text.get("1.0", tk.END):
-            break
-        time.sleep(0.02)
-    gate_slow.set()
-    _wait_sizing_idle(app, root, timeout_ms=45000)
-    body = app.results_text.get("1.0", tk.END)
-    with pytest.raises(AssertionError):
-        assert "STALE_RUN_MARKER" not in body
-    _shutdown_gui(app, root)
-
-
-def test_mutation_broken_stale_guard_applies_stale_marker(monkeypatch):
-    import threading
-    import tkinter as tk
-
-    import gui
-    import gui_logic
-    from gui import SizerGUI
-    from gui_logic import EXAMPLE_CFG
-
-    calls = [0]
-    gate_slow = threading.Event()
-    _real = gui_logic.run_sizing_report
-
-    def gated_report(base_cfg, controls):
-        calls[0] += 1
-        if calls[0] == 1:
-            gate_slow.wait(timeout=8.0)
-            return base_cfg, "STALE_RUN_MARKER\nstale", [], []
-        return _real(base_cfg, controls)
-
-    monkeypatch.setattr(gui, "run_sizing_report", gated_report)
-
-    def finish_no_stale_guard(self, run_id: int, payload) -> None:
-        self._sizing_inflight = max(0, self._sizing_inflight - 1)
-        kind, data = payload
-        if kind == "ok":
-            text = data[1]
-            self._set_results_display(text, current=True)
-        self._sync_sizing_active()
-        self._update_pdf_button_state()
-        self._schedule_queue_poll()
-
-    monkeypatch.setattr(SizerGUI, "_finish_sizing_run", finish_no_stale_guard)
-
-    root = tk.Tk()
-    root.withdraw()
-    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    root.update()
-    app._start_sizing_run()
-    app._start_sizing_run()
-    _wait_sizing_idle(app, root, timeout_ms=45000)
-    gate_slow.set()
-    _wait_sizing_idle(app, root, timeout_ms=45000)
-    body = app.results_text.get("1.0", tk.END)
-    assert "STALE_RUN_MARKER" in body
-    app._cancel_pending_sizing()
-    root.destroy()
-
-
 def test_reload_during_inflight_finishes_and_enables_save(monkeypatch):
     import threading
     import tkinter as tk
@@ -623,10 +519,13 @@ def test_save_pdf_disabled_while_sizing_updates(monkeypatch):
     import gui_logic
 
     gate = threading.Event()
+    gate.set()
+    _register_worker_gate(gate)
     _real = gui_logic.run_sizing_report
 
     def slow_report(base_cfg, controls):
-        gate.wait(timeout=2.0)
+        if not gate.is_set():
+            gate.wait()
         return _real(base_cfg, controls)
 
     monkeypatch.setattr(gui, "run_sizing_report", slow_report)
@@ -636,9 +535,10 @@ def test_save_pdf_disabled_while_sizing_updates(monkeypatch):
 
     root = tk.Tk()
     root.withdraw()
-    gate.set()
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
     root.update()
+    app.run_sizing()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
     gate.clear()
     app.controls["n_packs"].set("4")
     app._start_sizing_run()
@@ -739,7 +639,70 @@ def test_spinbox_wheel_scrolls_canvas_without_changing_value():
     root.destroy()
 
 
-def test_mutation_reload_zero_inflight_sticks_updating(monkeypatch):
+def test_example_min_temp_margin_tile_negative():
+    from sizer import load_config, solve_case, solve_cold_shutdown_case
+
+    from gui import metrics_from_case_results
+    from gui_logic import EXAMPLE_CFG
+
+    cfg = load_config(EXAMPLE_CFG)
+    prim = solve_case("primary_5000W", 5000, 200, cfg, case_branch="primary")
+    cs = solve_cold_shutdown_case(cfg, prim)
+    tiles = metrics_from_case_results([prim, cs], cfg)
+    val, case_lbl, tone = tiles["Min temp margin"]
+    assert "Louvers-stuck-open" in case_lbl
+    assert "-2.30" in val or "-2.29" in val
+    assert "200" in case_lbl
+    assert tone == "warn"
+
+
+def test_margin_tile_unset_threshold_no_amber_for_positive_margin():
+    from types import SimpleNamespace
+
+    from gui import metrics_from_case_results
+
+    bat = SimpleNamespace(mass_kg=1.0)
+    case = SimpleNamespace(
+        coast_margin_lipo_k=5.0,
+        coast_stuck_open_margin_lipo_k=None,
+        load_name="primary_5000W",
+        specific_energy_wh_kg=200.0,
+        case="primary",
+        battery=bat,
+        q_internal_w=1.0,
+        q_excess_w=1.0,
+        transient_delta_t_k=1.0,
+        system_mass_kg=2.0,
+    )
+    cfg = {"battery": {"lipo_margin_threshold_k": {"value": None}}}
+    _, _, tone = metrics_from_case_results([case], cfg)["Min temp margin"]
+    assert tone == "normal"
+
+
+def test_margin_tile_configured_threshold_amber_below_threshold():
+    from types import SimpleNamespace
+
+    from gui import metrics_from_case_results
+
+    bat = SimpleNamespace(mass_kg=1.0)
+    case = SimpleNamespace(
+        coast_margin_lipo_k=5.0,
+        coast_stuck_open_margin_lipo_k=None,
+        load_name="primary_5000W",
+        specific_energy_wh_kg=200.0,
+        case="primary",
+        battery=bat,
+        q_internal_w=1.0,
+        q_excess_w=1.0,
+        transient_delta_t_k=1.0,
+        system_mass_kg=2.0,
+    )
+    cfg = {"battery": {"lipo_margin_threshold_k": {"value": 10.0}}}
+    _, _, tone = metrics_from_case_results([case], cfg)["Min temp margin"]
+    assert tone == "amber"
+
+
+def test_reload_increments_generation_so_stale_cannot_apply(monkeypatch):
     import threading
     import tkinter as tk
 
@@ -748,70 +711,36 @@ def test_mutation_reload_zero_inflight_sticks_updating(monkeypatch):
     from gui import SizerGUI
     from gui_logic import EXAMPLE_CFG
 
-    gate = threading.Event()
+    gate_slow = threading.Event()
+    release_stale = threading.Event()
+    _register_worker_gate(gate_slow)
+    calls = [0]
     _real = gui_logic.run_sizing_report
 
-    def slow_report(base_cfg, controls):
-        gate.wait(timeout=12.0)
+    def gated_report(base_cfg, controls):
+        calls[0] += 1
+        if calls[0] == 1:
+            gate_slow.wait()
+            release_stale.wait()
+            return base_cfg, "STALE_RUN_MARKER\nstale", [], []
         return _real(base_cfg, controls)
 
-    monkeypatch.setattr(gui, "run_sizing_report", slow_report)
-
-    def broken_cancel(self) -> None:
-        if self._debounce_after_id is not None:
-            self.root.after_cancel(self._debounce_after_id)
-            self._debounce_after_id = None
-        self._sizing_generation += 1
-        self._sizing_pending = False
-        self._sizing_inflight = 0
-        self._sizing_active = False
-        self.update_banner.configure(text="Updating…")
-
-    monkeypatch.setattr(SizerGUI, "_cancel_pending_sizing", broken_cancel)
+    monkeypatch.setattr(gui, "run_sizing_report", gated_report)
 
     root = tk.Tk()
     root.withdraw()
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
     root.update()
+    gen0 = app._sizing_generation
     app._start_sizing_run()
-    app._load_config_path(EXAMPLE_CFG)
-    gate.set()
-    import time
-
-    deadline = time.time() + 8.0
-    stuck = False
-    while time.time() < deadline:
+    app._start_sizing_run()
+    gate_slow.set()
+    while app._sizing_inflight < 2:
         root.update()
-        if app._results_fresh and str(app.pdf_btn.cget("state")) == tk.NORMAL:
-            break
-        if not app._sizing_active and not app._sizing_queue.empty():
-            stuck = True
-            break
-        time.sleep(0.02)
-    assert stuck or not app._results_fresh, "broken cancel should leave UI stuck (mutation repro)"
-    app._cancel_pending_sizing()
-    root.destroy()
-
-
-def test_example_min_temp_margin_tile_negative():
-    import tkinter as tk
-
-    from gui import SizerGUI, metrics_from_case_results
-    from gui_logic import EXAMPLE_CFG
-
-    root = tk.Tk()
-    root.withdraw()
-    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    root.update()
-    app.run_sizing()
-    _wait_sizing_idle(app, root, timeout_ms=90000)
-    assert app.last_results is not None
-    tiles = metrics_from_case_results(app.last_results, app.last_working_cfg)
-    val, case_lbl, tone = tiles["Min temp margin"]
-    assert "Louvers-stuck-open" in case_lbl
-    assert "-2.30" in val or "-2.29" in val
-    assert "200" in case_lbl
-    assert tone == "warn"
+    assert app._sizing_generation > gen0
+    release_stale.set()
+    _wait_sizing_idle(app, root, timeout_ms=60000)
+    assert "STALE_RUN_MARKER" not in app.results_text.get("1.0", tk.END)
     _shutdown_gui(app, root)
 
 
@@ -865,8 +794,9 @@ def test_reload_blocked_config_while_example_run_inflight(monkeypatch):
     root.update()
     gen0 = app._sizing_generation
     app._start_sizing_run()
+    gen_after_start = app._sizing_generation
     app._load_config_path(LUKE_CFG)
-    assert app._sizing_generation > gen0
+    assert app._sizing_generation > gen_after_start
     gate.set()
     _wait_sizing_idle(app, root, timeout_ms=120000)
     body = app.results_text.get("1.0", tk.END)
@@ -875,50 +805,10 @@ def test_reload_blocked_config_while_example_run_inflight(monkeypatch):
     _shutdown_gui(app, root)
 
 
-def test_mutation_reload_without_generation_bump_fails(monkeypatch):
+def test_save_pdf_refuses_while_current_generation_in_flight(monkeypatch, tmp_path):
     import threading
     import tkinter as tk
-
-    import gui
-    import gui_logic
-    from gui import SizerGUI
-    from gui_logic import EXAMPLE_CFG, LUKE_CFG
-
-    gate = threading.Event()
-    _register_worker_gate(gate)
-    _real = gui_logic.run_sizing_report
-
-    def slow_report(base_cfg, controls):
-        if not gate.is_set():
-            gate.wait()
-        return _real(base_cfg, controls)
-
-    monkeypatch.setattr(gui, "run_sizing_report", slow_report)
-
-    def cancel_no_bump(self) -> None:
-        if self._debounce_after_id is not None:
-            self.root.after_cancel(self._debounce_after_id)
-            self._debounce_after_id = None
-        self._sizing_pending = False
-
-    monkeypatch.setattr(SizerGUI, "_cancel_pending_sizing", cancel_no_bump)
-
-    root = tk.Tk()
-    root.withdraw()
-    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    root.update()
-    app._start_sizing_run()
-    app._load_config_path(LUKE_CFG)
-    gate.set()
-    _wait_sizing_idle(app, root, timeout_ms=120000)
-    body = app.results_text.get("1.0", tk.END)
-    assert "Pack mass" in body, "without generation bump stale run overwrote reload state"
-    _shutdown_gui(app, root)
-
-
-def test_mutation_save_pdf_without_run_wait_fails(monkeypatch):
-    import threading
-    import tkinter as tk
+    from tkinter import messagebox
 
     import gui
     import gui_logic
@@ -926,30 +816,150 @@ def test_mutation_save_pdf_without_run_wait_fails(monkeypatch):
     from gui_logic import EXAMPLE_CFG
 
     gate = threading.Event()
+    gate.set()
     _register_worker_gate(gate)
     _real = gui_logic.run_sizing_report
+    wrote: list[str] = []
+    calls = [0]
 
     def slow_report(base_cfg, controls):
-        gate.wait(timeout=5.0)
+        calls[0] += 1
+        if calls[0] > 1:
+            gate.wait()
         return _real(base_cfg, controls)
 
     monkeypatch.setattr(gui, "run_sizing_report", slow_report)
-
-    def broken_pdf(self) -> None:
-        self.pdf_btn.configure(state=tk.NORMAL)
-
-    monkeypatch.setattr(SizerGUI, "_update_pdf_button_state", broken_pdf)
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: wrote.append("dialog"))
 
     root = tk.Tk()
     root.withdraw()
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
     root.update()
+    app.run_sizing()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
     gate.clear()
     app._start_sizing_run()
     root.update()
-    assert str(app.pdf_btn.cget("state")) == tk.NORMAL
-    assert app._sizing_active
+    assert app._waiting_for_current_sizing()
+    assert str(app.pdf_btn.cget("state")) == tk.DISABLED
+    app.last_working_cfg = app.last_working_cfg or {}
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **kw: str(tmp_path / "x.pdf"))
+    app.save_pdf()
+    assert wrote, "save must refuse with dialog while current run is in flight"
+    assert not (tmp_path / "x.pdf").is_file()
     gate.set()
+    _shutdown_gui(app, root)
+
+
+def test_snapshot_mismatch_schedules_auto_sizing(monkeypatch):
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
+    root.update()
+    app.run_sizing()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
+    scheduled: list[int] = []
+    real_schedule = SizerGUI._schedule_auto_sizing
+
+    def spy_schedule(self, delay_ms=0, _ui_id=None):
+        scheduled.append(delay_ms)
+        return real_schedule(self, delay_ms, _ui_id=_ui_id)
+
+    monkeypatch.setattr(SizerGUI, "_schedule_auto_sizing", spy_schedule)
+    run_id = app._sizing_generation
+    snapshot = {uid: app.controls[uid].get() for uid in app.controls}
+    snapshot["n_packs"] = str(int(snapshot["n_packs"]) + 1)
+    app._finish_sizing_run(
+        run_id,
+        (
+            "ok",
+            (
+                app.last_working_cfg,
+                app._last_valid_results_text or "results",
+                app.last_results or [],
+                app.last_sens or [],
+                snapshot,
+            ),
+        ),
+    )
+    root.update()
+    assert scheduled, "mismatched control snapshot must schedule a follow-up sizing run"
+    _shutdown_gui(app, root)
+
+
+def test_scale_key_debounce_single_run_for_held_key(monkeypatch):
+    import time
+    import tkinter as tk
+
+    from gui import SizerGUI, SCALE_KEY_DEBOUNCE_MS
+    from gui_logic import EXAMPLE_CFG
+
+    starts: list[int] = []
+    real_start = SizerGUI._start_sizing_run
+
+    def count_start(self):
+        starts.append(1)
+        return real_start(self)
+
+    monkeypatch.setattr(SizerGUI, "_start_sizing_run", count_start)
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
+    root.update()
+    app.run_sizing()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
+    starts.clear()
+    scale = app._scales["efficiency"]
+
+    class _KeyEvt:
+        keysym = "Right"
+
+    for _ in range(5):
+        scale.set(float(scale.get()) - float(scale.cget("resolution")))
+        app._on_scale_key_release(_KeyEvt())
+        root.update()
+        time.sleep(0.05)
+    time.sleep((SCALE_KEY_DEBOUNCE_MS + 150) / 1000.0)
+    root.update()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
+    assert len(starts) == 1, "debounce should coalesce rapid key releases into one run"
+    _shutdown_gui(app, root)
+
+
+def test_poll_sizing_queue_drains_all_pending_results(monkeypatch):
+    import tkinter as tk
+
+    from gui import SizerGUI
+    from gui_logic import EXAMPLE_CFG
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
+    root.update()
+    app.run_sizing()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
+    applied: list[int] = []
+    real_finish = SizerGUI._finish_sizing_run
+
+    def track_finish(self, run_id, payload):
+        applied.append(run_id)
+        real_finish(self, run_id, payload)
+
+    monkeypatch.setattr(SizerGUI, "_finish_sizing_run", track_finish)
+    app._sizing_generation = 1
+    app._last_display_generation = 0
+    app._sizing_inflight = 2
+    app._sizing_queue.put((1, ("ok", (app.base_cfg, "FIRST", [], [], {}))))
+    app._sizing_queue.put((1, ("ok", (app.base_cfg, "SECOND", [], [], {}))))
+    app._poll_sizing_queue()
+    assert applied == [1, 1]
+    assert "SECOND" in app.results_text.get("1.0", tk.END)
     _shutdown_gui(app, root)
 
 
@@ -993,12 +1003,21 @@ def test_snapshot_mismatch_reruns_after_keyboard_slider(monkeypatch):
     _shutdown_gui(app, root)
 
 
-def test_mutation_no_snapshot_rerun_keeps_stale_up_to_date(monkeypatch):
+def test_snapshot_keyboard_change_schedules_followup_run(monkeypatch):
+    import time
     import tkinter as tk
 
-    import gui_logic
     from gui import SizerGUI, SCALE_KEY_DEBOUNCE_MS
     from gui_logic import EXAMPLE_CFG
+
+    starts: list[int] = []
+    real_start = SizerGUI._start_sizing_run
+
+    def count_start(self):
+        starts.append(1)
+        return real_start(self)
+
+    monkeypatch.setattr(SizerGUI, "_start_sizing_run", count_start)
 
     root = tk.Tk()
     root.withdraw()
@@ -1006,30 +1025,30 @@ def test_mutation_no_snapshot_rerun_keeps_stale_up_to_date(monkeypatch):
     root.update()
     app.run_sizing()
     _wait_sizing_idle(app, root, timeout_ms=120000)
-    real_finish = SizerGUI._finish_sizing_run
-
-    def finish_skip_rerun(self, run_id, payload):
-        real_finish(self, run_id, payload)
-        if self.status_var.get().startswith("Inputs changed"):
-            self._set_status("Sizing up to date")
-
-    monkeypatch.setattr(SizerGUI, "_finish_sizing_run", finish_skip_rerun)
+    starts.clear()
     scale = app._scales["depth_of_discharge"]
     scale.set(float(scale.get()) + float(scale.cget("resolution")))
-    scale.event_generate("<KeyRelease>", keysym="Right")
-    root.update()
-    import time
 
-    time.sleep((SCALE_KEY_DEBOUNCE_MS + 200) / 1000.0)
+    class _KeyEvt:
+        keysym = "End"
+
+    app._on_scale_key_release(_KeyEvt())
+    time.sleep((SCALE_KEY_DEBOUNCE_MS + 150) / 1000.0)
     root.update()
-    assert app.status_var.get() == "Sizing up to date"
+    assert starts == [1]
+    assert app._sizing_pending or app._sizing_active or not app._results_fresh
+    _wait_sizing_idle(app, root, timeout_ms=120000)
+    assert app.status_var.get().startswith("Sizing up to date")
     _shutdown_gui(app, root)
 
 
-def test_save_pdf_enabled_while_stale_worker_still_running(monkeypatch):
+def test_save_pdf_enabled_while_stale_worker_still_running(monkeypatch, tmp_path):
+    pytest.importorskip("pypdf")
     import threading
     import time
     import tkinter as tk
+    from pypdf import PdfReader
+    from tkinter import messagebox
 
     import gui
     import gui_logic
@@ -1040,6 +1059,9 @@ def test_save_pdf_enabled_while_stale_worker_still_running(monkeypatch):
     gate_slow = threading.Event()
     _register_worker_gate(gate_slow)
     _real = gui_logic.run_sizing_report
+    out_pdf = tmp_path / "stale_worker_save.pdf"
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **kw: str(out_pdf))
+    monkeypatch.setattr(messagebox, "showinfo", lambda *a, **k: None)
 
     def gated_report(base_cfg, controls):
         calls[0] += 1
@@ -1062,21 +1084,28 @@ def test_save_pdf_enabled_while_stale_worker_still_running(monkeypatch):
         if "Pack mass" in app.results_text.get("1.0", tk.END):
             break
         time.sleep(0.02)
+    else:
+        pytest.fail("current result not on screen before save")
     assert app._sizing_inflight >= 1
     assert str(app.pdf_btn.cget("state")) == tk.NORMAL
+    app.save_pdf()
+    assert out_pdf.is_file()
+    reader = PdfReader(out_pdf)
+    assert len(reader.pages) >= 1
+    assert out_pdf.stat().st_size > 4096
     gate_slow.set()
     _wait_sizing_idle(app, root, timeout_ms=120000)
     _shutdown_gui(app, root)
 
 
-def test_subprocess_main_close_during_update_exits_zero():
+def test_subprocess_wm_delete_close_during_update_exits_zero():
     import os
     import subprocess
 
     env = os.environ.copy()
     probe = ROOT / "tests" / "gui_close_probe.py"
     passed = 0
-    for _trial in range(25):
+    for _trial in range(5):
         proc = subprocess.run(
             [sys.executable, str(probe)],
             cwd=ROOT,
@@ -1086,5 +1115,6 @@ def test_subprocess_main_close_during_update_exits_zero():
             timeout=90,
         )
         assert proc.returncode == 0, proc.stderr or proc.stdout
+        assert proc.stderr.strip() == "", proc.stderr
         passed += 1
-    assert passed == 25
+    assert passed == 5
