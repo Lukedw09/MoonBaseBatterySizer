@@ -13,9 +13,9 @@ import pytest
 import gui_logic
 from sizer import ConfigError, layout_unused_input_messages, load_config, param_value
 
+from conftest import EXAMPLE, LUKE_CFG
+
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = ROOT / "examples" / "example_config.yaml"
-LUKE_CFG = ROOT / "config.yaml"
 
 EXPECTED_UI_CFG_KEYS = {
     ("geometry", "n_packs"),
@@ -34,11 +34,6 @@ EXPECTED_UI_CFG_KEYS = {
     ("wake_up", "panel_efficiency"),
     ("wake_up", "sun_incidence_cosine"),
 }
-
-
-@pytest.fixture
-def example_cfg():
-    return load_config(EXAMPLE)
 
 
 def test_gui_logic_imports_without_tkinter():
@@ -92,8 +87,8 @@ def test_gui_ui_override_only_on_change(example_cfg):
     assert cfg["loads"]["primary_w"]["owner"].startswith("ui-override")
 
 
-def test_gui_blocker_gate_blocks_luke_config():
-    blocked, messages = gui_logic.app_gate_blocked(load_config(LUKE_CFG))
+def test_gui_blocker_gate_blocks_incomplete_design(incomplete_blocked_cfg):
+    blocked, messages = gui_logic.app_gate_blocked(incomplete_blocked_cfg)
     assert blocked
     assert len(messages) == 20
 
@@ -133,13 +128,20 @@ def test_app_gate_blocks_radiator_above_box_temperature(example_cfg):
     assert any("≤" in m or "<=" in m for m in messages)
 
 
-def test_luke_gate_lists_layout_unused_notes():
-    luke = load_config(LUKE_CFG)
-    blocked, messages = gui_logic.app_gate_blocked(luke)
+def test_luke_gate_lists_layout_unused_notes(luke_cfg):
+    blocked, messages = gui_logic.app_gate_blocked(luke_cfg)
+    assert not blocked
+    assert messages == []
+    notes = layout_unused_input_messages(luke_cfg)
+    assert any("bottom_radiates_to" in n for n in notes)
+
+
+def test_incomplete_design_gate_lists_layout_unused_notes(incomplete_blocked_cfg):
+    blocked, messages = gui_logic.app_gate_blocked(incomplete_blocked_cfg)
     assert blocked
     assert len(messages) == 20
     assert not any("bottom_radiates_to" in m for m in messages)
-    notes = layout_unused_input_messages(luke)
+    notes = layout_unused_input_messages(incomplete_blocked_cfg)
     assert any("bottom_radiates_to" in n for n in notes)
 
 

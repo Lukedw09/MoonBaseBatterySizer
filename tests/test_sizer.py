@@ -78,9 +78,10 @@ from sizer import (
     N_PACK_SWEEP_FONT_SIZE,
 )
 
+from conftest import EXAMPLE, LEGACY_DESIGN_BLOCKER_PATHS, LUKE_CFG
+from sizer import primary_load_label
+
 ROOT = Path(__file__).resolve().parents[1]
-EXAMPLE = ROOT / "examples" / "example_config.yaml"
-LUKE_CFG = ROOT / "config.yaml"
 
 FIN_BENCH = dict(k_leg=6.7, a_cross=0.001, perimeter_m=0.126, length_m=1.0, t_root=350.0, t_inf=40.0, h_lin=2.0)
 LEG_BVP = dict(
@@ -100,11 +101,6 @@ LEG_BVP = dict(
     k_regolith=7.4e-4,
     sigma=SIGMA_DEFAULT,
 )
-
-
-@pytest.fixture
-def example_cfg():
-    return load_config(EXAMPLE)
 
 
 def test_night_energy_wh():
@@ -137,17 +133,38 @@ def test_pick_internal_matches_eta_definition_round_trip():
     assert val == q["round_trip_definition"]
 
 
-def test_luke_config_still_blocks_until_geometry_set():
+def test_luke_config_is_runnable():
     cfg = load_config(LUKE_CFG)
     missing = blocking_missing(cfg)
     assert "battery.eta_definition" not in missing
-    with pytest.raises(DesignInputError):
-        validate_for_run(cfg)
+    assert "geometry.n_packs" not in missing
+    assert param_value(cfg, "loads", "primary_w") == 3000
+    assert param_value(cfg, "geometry", "n_packs") == 8
+    validate_for_run(cfg)
 
 
-def test_missing_list_includes_n_packs():
-    cfg = load_config(LUKE_CFG)
-    missing = blocking_missing(cfg)
+def test_luke_run_all_cases_primary_load_label(luke_cfg):
+    results = run_all_cases(luke_cfg)
+    primary = [r for r in results if r.case == "primary"]
+    assert len(primary) == 2
+    assert all(r.load_name == "primary_3000W" for r in primary)
+
+
+def test_luke_cli_lists_primary_3000w_label(luke_cfg, capsys):
+    from sizer import format_results_table, main, rtg_module_enabled
+
+    assert main([str(LUKE_CFG)]) == 0
+    out = capsys.readouterr().out
+    assert "primary_3000W" in out
+    assert "primary_5000W" not in out
+    coupling_set = rtg_module_enabled(luke_cfg) and param_value(luke_cfg, "rtg", "coupling_fraction") is not None
+    text = format_results_table(run_all_cases(luke_cfg), coupling_set, luke_cfg)
+    assert "primary_3000W" in text
+    assert "primary_5000W" not in text
+
+
+def test_missing_list_includes_n_packs_when_unset(incomplete_blocked_cfg):
+    missing = blocking_missing(incomplete_blocked_cfg)
     assert "geometry.n_packs" in missing
 
 
@@ -390,7 +407,7 @@ def test_run_all_cases_primary_and_cold_only(example_cfg):
     results = run_all_cases(example_cfg)
     assert len(results) == 4
     names = {r.load_name for r in results}
-    assert names == {"primary_5000W", "cold_shutdown_0W"}
+    assert names == {primary_load_label(example_cfg), "cold_shutdown_0W"}
 
 
 def test_solve_case_end_to_end(example_cfg):
@@ -465,40 +482,13 @@ def test_dawn_warmup_energy_hand_calc(example_cfg):
     assert w["energy_wh"] == pytest.approx(p_hand * tau_h, rel=0.001)
 
 
-LUKE_DESIGN_BLOCKERS = sorted(
-    [
-        "battery.cell_nominal_voltage_v",
-        "battery.packaging_insulation_mass_factor",
-        "geometry.box_height_m",
-        "geometry.box_length_m",
-        "geometry.box_width_m",
-        "geometry.n_packs",
-        "lander_legs.footpad_area_m2",
-        "lander_legs.leg_cross_section_m2",
-        "lander_legs.leg_length_m",
-        "lander_legs.leg_perimeter_m",
-        "lander_legs.leg_surface_emissivity",
-        "losses.passthrough_w",
-        "radiator.louver_area_multiplier",
-        "radiator.radiator_areal_mass_kg_per_m2",
-        "radiator.radiator_closed_emissivity",
-        "radiator.radiator_emissivity",
-        "radiator.radiator_temperature_k",
-        "wake_up.panel_areal_mass_kg_per_m2",
-        "wake_up.panel_efficiency",
-        "wake_up.sun_incidence_cosine",
-    ]
-)
-
-
-def test_luke_config_has_20_cli_blockers():
-    luke = load_config(LUKE_CFG)
-    got = sorted(design_blockers(luke))
+def test_incomplete_design_has_20_cli_blockers(incomplete_blocked_cfg):
+    got = sorted(design_blockers(incomplete_blocked_cfg))
     assert len(got) == 20
-    assert got == LUKE_DESIGN_BLOCKERS
+    assert got == LEGACY_DESIGN_BLOCKER_PATHS
     with pytest.raises(DesignInputError) as err:
-        validate_for_run(luke)
-    assert sorted(err.value.missing) == LUKE_DESIGN_BLOCKERS
+        validate_for_run(incomplete_blocked_cfg)
+    assert sorted(err.value.missing) == LEGACY_DESIGN_BLOCKER_PATHS
 
 
 def test_break_even_hand_calc_n8(example_cfg):
@@ -643,7 +633,7 @@ def test_distributed_layout_notes_in_pdf_and_not_blockers(example_cfg, tmp_path)
     assert any("bottom_radiates_to" in n for n in luke_notes)
     assert any("ring_radius_m" in n and "not used by distributed_packs layout" in n for n in luke_notes)
     assert not any("ring_radius_m" in n and "bottom to ground" in n for n in luke_notes)
-    assert len(design_blockers(luke)) == 20
+    assert len(design_blockers(luke)) == 0
     results = run_all_cases(example_cfg)
     pdf = tmp_path / "layout_notes.pdf"
     write_report_pdf(pdf, example_cfg, results, [], todo_luke_list(example_cfg))
@@ -692,10 +682,10 @@ def test_n_packs_249_still_uses_n_packs_mesh_message(example_cfg):
         pytest.fail("expected FinSolverError")
 
 
-def test_cli_blocked_prints_layout_ignored_notes(capsys):
+def test_cli_blocked_prints_layout_ignored_notes(capsys, blocked_config_path):
     from sizer import main
 
-    assert main([str(LUKE_CFG)]) == 2
+    assert main([str(blocked_config_path)]) == 2
     out = capsys.readouterr().out
     assert "layout (ignored by current layout model)" in out
     assert "bottom_radiates_to" in out

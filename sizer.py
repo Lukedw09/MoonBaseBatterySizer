@@ -114,6 +114,13 @@ def param_value(cfg: Dict[str, Any], *keys: str) -> Any:
     return node
 
 
+def primary_load_label(cfg: Dict[str, Any]) -> str:
+    """Primary night-load case name: primary_<W>W from loads.primary_w."""
+    w = float(param_value(cfg, "loads", "primary_w"))
+    wi = int(w) if w == int(w) else w
+    return f"primary_{wi}W"
+
+
 def param_owner(cfg: Dict[str, Any], *keys: str) -> str:
     node: Any = cfg
     for k in keys:
@@ -1792,7 +1799,7 @@ def format_results_table(results: List[CaseResult], coupling_set: bool, cfg: Opt
             f"  Q_loss @ Hayne depth k = {r.thermal.q_total_at_depth_k_w:.1f} W "
             f"(legs {r.thermal.q_leg_at_depth_k_w:.1f} W)"
         )
-        if r.load_name == "primary_5000W" and r.q_excess_w > 0:
+        if r.case == "primary" and r.q_excess_w > 0:
             e_reject_kwh = r.q_excess_w * r.battery.t_dark_h / 1000.0
             d_t = r.transient_delta_t_k if r.transient_delta_t_k is not None else 0.0
             lines.append(
@@ -1869,9 +1876,10 @@ def run_all_cases(cfg: Dict[str, Any]) -> List[CaseResult]:
     se_low = param_value(cfg, "battery", "specific_energy_wh_per_kg_low")
     se_high = param_value(cfg, "battery", "specific_energy_wh_per_kg_high")
     primary_w = param_value(cfg, "loads", "primary_w")
+    load_name = primary_load_label(cfg)
     results: List[CaseResult] = []
     for se in (se_low, se_high):
-        prim = solve_case("primary_5000W", primary_w, se, cfg, case_branch="primary")
+        prim = solve_case(load_name, primary_w, se, cfg, case_branch="primary")
         results.append(prim)
         results.append(solve_cold_shutdown_case(cfg, prim))
     return results
@@ -1884,11 +1892,12 @@ def run_n_packs_sensitivity(
     import copy
 
     primary_w = param_value(cfg, "loads", "primary_w")
+    load_name = primary_load_label(cfg)
     rows: List[Dict[str, Any]] = []
     for n in n_list:
         c = copy.deepcopy(cfg)
         c["geometry"]["n_packs"]["value"] = n
-        r = solve_case("primary_5000W", primary_w, specific_energy, c, case_branch="primary")
+        r = solve_case(load_name, primary_w, specific_energy, c, case_branch="primary")
         cs = solve_cold_shutdown_case(c, r)
         th_closed = compute_thermal_loss(
             c,

@@ -133,7 +133,7 @@ def test_all_scales_fit_row_at_max_value():
     root.destroy()
 
 
-def test_luke_config_read_only_tuning_run_save_disabled():
+def test_luke_config_tuning_run_save_enabled():
     import tkinter as tk
 
     from gui import SizerGUI
@@ -143,9 +143,28 @@ def test_luke_config_read_only_tuning_run_save_disabled():
     root.withdraw()
     app = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
     root.update()
-    assert str(app.run_btn.cget("state")) == tk.DISABLED
+    assert str(app.run_btn.cget("state")) == tk.NORMAL
+    # Save PDF enables only after a successful sizing run (_results_fresh + last_working_cfg).
     assert str(app.pdf_btn.cget("state")) == tk.DISABLED
     assert "luke" in app._owner_labels["pack_volumetric_energy_density_wh_per_m3"].cget("text").lower()
+    assert "(unset)" not in app._owner_labels["radiator_temperature_k"].cget("text")
+    app.run_sizing()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
+    assert str(app.pdf_btn.cget("state")) == tk.NORMAL
+    root.destroy()
+
+
+def test_blocked_design_config_read_only_tuning_run_save_disabled(blocked_config_path):
+    import tkinter as tk
+
+    from gui import SizerGUI
+
+    root = tk.Tk()
+    root.withdraw()
+    app = SizerGUI(root, config_path=blocked_config_path, auto_run_after_load=False)
+    root.update()
+    assert str(app.run_btn.cget("state")) == tk.DISABLED
+    assert str(app.pdf_btn.cget("state")) == tk.DISABLED
     assert "(unset)" in app._owner_labels["radiator_temperature_k"].cget("text")
     root.destroy()
 
@@ -191,16 +210,16 @@ def test_scale_widgets_exist_mapped_with_value_labels():
     root.destroy()
 
 
-def test_luke_blocked_yaml_unset_controls_not_invented_values():
+def test_blocked_yaml_unset_controls_not_invented_values(blocked_config_path):
     import tkinter as tk
 
     from gui import SizerGUI
-    from gui_logic import LUKE_CFG, UI_CONTROL_TO_CFG_KEYS
+    from gui_logic import UI_CONTROL_TO_CFG_KEYS
     from sizer import param_value
 
     root = tk.Tk()
     root.withdraw()
-    app = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
+    app = SizerGUI(root, config_path=blocked_config_path, auto_run_after_load=False)
     root.update()
     null_ui_keys = (
         "n_packs",
@@ -244,15 +263,14 @@ def _assert_blocked_scale_ignores_interaction(scale, owner_label, v0: float) -> 
     assert "ui-override" not in cap_before
 
 
-def test_blocked_scales_ignore_mouse_keys_and_wheel():
+def test_blocked_scales_ignore_mouse_keys_and_wheel(blocked_config_path):
     import tkinter as tk
 
     from gui import SizerGUI
-    from gui_logic import LUKE_CFG
 
     root = tk.Tk()
     root.withdraw()
-    app = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
+    app = SizerGUI(root, config_path=blocked_config_path, auto_run_after_load=False)
     root.update()
     assert not app._controls_editable
     for ui_id in ("depth_of_discharge", "efficiency"):
@@ -768,14 +786,14 @@ def test_n_packs_spinbox_keeps_config_value_above_slider_max(tmp_path):
     _shutdown_gui(app, root)
 
 
-def test_reload_blocked_config_while_example_run_inflight(monkeypatch):
+def test_reload_blocked_config_while_example_run_inflight(monkeypatch, blocked_config_path):
     import threading
     import tkinter as tk
 
     import gui
     import gui_logic
     from gui import SizerGUI
-    from gui_logic import EXAMPLE_CFG, LUKE_CFG
+    from gui_logic import EXAMPLE_CFG
 
     gate = threading.Event()
     _real = gui_logic.run_sizing_report
@@ -795,7 +813,7 @@ def test_reload_blocked_config_while_example_run_inflight(monkeypatch):
     gen0 = app._sizing_generation
     app._start_sizing_run()
     gen_after_start = app._sizing_generation
-    app._load_config_path(LUKE_CFG)
+    app._load_config_path(blocked_config_path)
     assert app._sizing_generation > gen_after_start
     gate.set()
     _wait_sizing_idle(app, root, timeout_ms=120000)
