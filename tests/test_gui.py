@@ -144,9 +144,13 @@ def test_luke_config_tuning_run_save_enabled():
     app = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
     root.update()
     assert str(app.run_btn.cget("state")) == tk.NORMAL
-    assert str(app.pdf_btn.cget("state")) == tk.NORMAL
+    # Save PDF enables only after a successful sizing run (_results_fresh + last_working_cfg).
+    assert str(app.pdf_btn.cget("state")) == tk.DISABLED
     assert "luke" in app._owner_labels["pack_volumetric_energy_density_wh_per_m3"].cget("text").lower()
     assert "(unset)" not in app._owner_labels["radiator_temperature_k"].cget("text")
+    app.run_sizing()
+    _wait_sizing_idle(app, root, timeout_ms=120000)
+    assert str(app.pdf_btn.cget("state")) == tk.NORMAL
     root.destroy()
 
 

@@ -78,12 +78,8 @@ from sizer import (
     N_PACK_SWEEP_FONT_SIZE,
 )
 
-from conftest import (
-    EXAMPLE,
-    LEGACY_DESIGN_BLOCKER_PATHS,
-    LUKE_CFG,
-    primary_load_label,
-)
+from conftest import EXAMPLE, LEGACY_DESIGN_BLOCKER_PATHS, LUKE_CFG
+from sizer import primary_load_label
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -145,6 +141,26 @@ def test_luke_config_is_runnable():
     assert param_value(cfg, "loads", "primary_w") == 3000
     assert param_value(cfg, "geometry", "n_packs") == 8
     validate_for_run(cfg)
+
+
+def test_luke_run_all_cases_primary_load_label(luke_cfg):
+    results = run_all_cases(luke_cfg)
+    primary = [r for r in results if r.case == "primary"]
+    assert len(primary) == 2
+    assert all(r.load_name == "primary_3000W" for r in primary)
+
+
+def test_luke_cli_lists_primary_3000w_label(luke_cfg, capsys):
+    from sizer import format_results_table, main, rtg_module_enabled
+
+    assert main([str(LUKE_CFG)]) == 0
+    out = capsys.readouterr().out
+    assert "primary_3000W" in out
+    assert "primary_5000W" not in out
+    coupling_set = rtg_module_enabled(luke_cfg) and param_value(luke_cfg, "rtg", "coupling_fraction") is not None
+    text = format_results_table(run_all_cases(luke_cfg), coupling_set, luke_cfg)
+    assert "primary_3000W" in text
+    assert "primary_5000W" not in text
 
 
 def test_missing_list_includes_n_packs_when_unset(incomplete_blocked_cfg):

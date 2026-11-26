@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from sizer import load_config, param_value
+from sizer import load_config, param_value, primary_load_label
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = ROOT / "examples" / "example_config.yaml"
@@ -41,19 +41,14 @@ LEGACY_DESIGN_BLOCKER_PATHS = sorted(
 )
 
 
-def primary_load_label(cfg) -> str:
-    """Match sizer load_name convention: primary_<W>W from config primary_w."""
-    w = float(param_value(cfg, "loads", "primary_w"))
-    wi = int(w) if w == int(w) else w
-    return f"primary_{wi}W"
-
-
 def clear_config_path(cfg: dict, dotted: str) -> None:
     parts = dotted.split(".")
     node = cfg
     for part in parts[:-1]:
         node = node[part]
-    node[parts[-1]]["value"] = None
+    field = node[parts[-1]]
+    field["value"] = None
+    field["owner"] = "TODO-luke"
 
 
 def make_incomplete_blocked_cfg(base: dict | None = None) -> dict:
