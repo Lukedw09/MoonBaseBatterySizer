@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import copy
+import os
 import queue
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -37,6 +39,8 @@ except ImportError:  # pragma: no cover - headless CI may lack tkinter
 TUNING_PANEL_MIN_WIDTH = 520
 SCALE_LENGTH = 190
 AUTO_SIZING_DEBOUNCE_MS = 600
+SCALE_KEY_DEBOUNCE_MS = 300
+SHUTDOWN_JOIN_TIMEOUT_S = 10.0
 ACCENT_COLOR = "#0d9488"
 HEADER_BG = "#0f172a"
 HEADER_FG = "#f8fafc"
@@ -180,7 +184,28 @@ def _case_tile_label(result: Any) -> str:
     return f"{name} @ {float(se):.0f} Wh/kg"
 
 
-def metrics_from_case_results(results: List[Any]) -> Dict[str, Tuple[str, str, str]]:
+def _margin_case_subtitle(result: Any, *, stuck_open: bool) -> str:
+    base = _case_tile_label(result)
+    if stuck_open:
+        return f"{base} — Louvers-stuck-open cold coast"
+    return f"{base} — LiPo margin at dawn (louvers closed)"
+
+
+def _details_monospace_font(root: tk.Misc) -> Tuple[str, int]:
+    if sys.platform.startswith("win"):
+        return ("Consolas", 9)
+    try:
+        import tkinter.font as tkfont
+
+        fixed = tkfont.nametofont("TkFixedFont")
+        return (str(fixed.actual("family")), 9)
+    except tk.TclError:
+        return ("Courier", 9)
+
+
+def metrics_from_case_results(
+    results: List[Any], cfg: Optional[dict] = None
+) -> Dict[str, Tuple[str, str, str]]:
     """Tile caption -> (value, case subtitle, tone: normal|warn|amber)."""
     if not results:
         return {k: ("—", "", "normal") for k in METRIC_TILE_KEYS}
@@ -201,17 +226,27 @@ def metrics_from_case_results(results: List[Any]) -> Dict[str, Tuple[str, str, s
         "Excess heat": (f"{primary.q_excess_w:.1f} W", plbl, "normal"),
         "ΔT coast": (f"{dt:.2f} K" if dt is not None else "—", plbl, "normal"),
     }
+    margin_thr = 6.0
+    if cfg is not None:
+        thr = param_value(cfg, "battery", "lipo_margin_threshold_k")
+        if thr is not None:
+            margin_thr = float(thr)
     min_margin: Optional[float] = None
     min_lbl = ""
+    min_stuck = False
     for r in results:
-        for val in (getattr(r, "coast_margin_lipo_k", None), getattr(r, "coast_stuck_open_margin_lipo_k", None)):
+        closed = getattr(r, "coast_margin_lipo_k", None)
+        stuck = getattr(r, "coast_stuck_open_margin_lipo_k", None)
+        for val, is_stuck in ((closed, False), (stuck, True)):
             if val is None:
                 continue
-            if min_margin is None or float(val) < min_margin:
-                min_margin = float(val)
-                min_lbl = _case_tile_label(r)
+            fv = float(val)
+            if min_margin is None or fv < min_margin:
+                min_margin = fv
+                min_stuck = is_stuck
+                min_lbl = _margin_case_subtitle(r, stuck_open=is_stuck)
     if min_margin is not None:
-        tone = "warn" if min_margin < 0 else ("amber" if min_margin < 6.0 else "normal")
+        tone = "warn" if min_margin < 0 else ("amber" if min_margin < margin_thr else "normal")
         out["Min temp margin"] = (f"{min_margin:.2f} K", min_lbl, tone)
     else:
         out["Min temp margin"] = ("—", "", "normal")
@@ -275,6 +310,9 @@ class SizerGUI:
         self._last_display_generation = 0
         self._pane_heading_label: Optional[ttk.Label] = None
         self._wheel_redirect_tag = "MoonBaseWheelToCanvas"
+        self._worker_threads: List[threading.Thread] = []
+        self._shutting_down = False
+        self._scale_debounce_after_id: Optional[str] = None
 
         header = tk.Frame(root, bg=HEADER_BG, height=72)
         header.pack(fill=tk.X)
@@ -371,7 +409,7 @@ class SizerGUI:
             text_wrap,
             wrap=tk.NONE,
             state=tk.DISABLED,
-            font=("DejaVu Sans Mono", 9),
+            font=_details_monospace_font(root),
             relief=tk.FLAT,
             borderwidth=0,
             padx=6,
@@ -430,6 +468,7 @@ class SizerGUI:
         self.root.bind("<Map>", lambda _e: self._layout_panes(), add=True)
         self.root.after_idle(self._layout_panes)
         self.root.after_idle(self._fit_window_to_content)
+        self.root.protocol("WM_DELETE_WINDOW", self._request_close)
 
     def _bind_tuning_mousewheel(self, widget: tk.Misc) -> None:
         widget.bind("<Enter>", self._tuning_wheel_bind_active, add=True)
@@ -598,8 +637,18 @@ class SizerGUI:
     def _on_scale_key_release(self, event: tk.Event) -> None:
         if self._populating_cfg or not self._controls_editable:
             return
-        if event.keysym in ("Left", "Right", "Up", "Down", "Prior", "Next"):
-            self._schedule_auto_sizing(0)
+        if event.keysym in ("Left", "Right", "Up", "Down", "Prior", "Next", "Home", "End"):
+            if self._scale_debounce_after_id is not None:
+                self.root.after_cancel(self._scale_debounce_after_id)
+            self._scale_debounce_after_id = self.root.after(
+                SCALE_KEY_DEBOUNCE_MS, self._scale_key_debounced_sizing
+            )
+
+    def _scale_key_debounced_sizing(self) -> None:
+        self._scale_debounce_after_id = None
+        if self._populating_cfg or not self._controls_editable:
+            return
+        self._schedule_auto_sizing(0)
 
     def _controls_match_snapshot(self, snapshot: Mapping[str, Any]) -> bool:
         for uid, val in snapshot.items():
@@ -673,13 +722,75 @@ class SizerGUI:
         snapshot = {uid: self.controls[uid].get() for uid in self.controls}
         base_cfg = copy.deepcopy(self.base_cfg)
 
-        threading.Thread(
+        worker = threading.Thread(
             target=_sizing_worker,
             args=(run_id, base_cfg, snapshot, self._sizing_queue),
-            daemon=True,
-        ).start()
+            daemon=False,
+            name=f"sizing-{run_id}",
+        )
+        self._worker_threads.append(worker)
+        worker.start()
         self._schedule_queue_poll()
         self._poll_sizing_queue()
+
+    def _prune_worker_threads(self) -> None:
+        self._worker_threads[:] = [t for t in self._worker_threads if t.is_alive()]
+
+    def _request_close(self, *_args: Any) -> None:
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        try:
+            self.root.withdraw()
+        except tk.TclError:
+            pass
+        if self._debounce_after_id is not None:
+            try:
+                self.root.after_cancel(self._debounce_after_id)
+            except tk.TclError:
+                pass
+            self._debounce_after_id = None
+        if self._scale_debounce_after_id is not None:
+            try:
+                self.root.after_cancel(self._scale_debounce_after_id)
+            except tk.TclError:
+                pass
+            self._scale_debounce_after_id = None
+        if self._poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._poll_after_id)
+            except tk.TclError:
+                pass
+            self._poll_after_id = None
+        self._sizing_generation += 1
+        self._sizing_pending = False
+        deadline = time.time() + SHUTDOWN_JOIN_TIMEOUT_S
+        while time.time() < deadline:
+            self._poll_sizing_queue()
+            for thread in list(self._worker_threads):
+                if thread.is_alive():
+                    thread.join(timeout=0.05)
+            self._prune_worker_threads()
+            if not self._worker_threads and self._sizing_inflight == 0 and self._sizing_queue.empty():
+                break
+            try:
+                self.root.update()
+            except tk.TclError:
+                break
+        try:
+            self.root.quit()
+        except tk.TclError:
+            pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except (OSError, ValueError, SystemError):
+            pass
+        os._exit(0)
 
     def _poll_sizing_queue(self) -> None:
         self._poll_after_id = None
@@ -693,6 +804,7 @@ class SizerGUI:
         if not self._sizing_active and self._sizing_inflight == 0:
             if str(self.update_banner.cget("text")) == "Updating…":
                 self.update_banner.configure(text="")
+        self._prune_worker_threads()
         self._update_pdf_button_state()
         self._update_run_button_state()
         self._schedule_queue_poll()
@@ -750,7 +862,8 @@ class SizerGUI:
             self._clear_metric_tiles()
 
     def _refresh_metric_tiles_from_results(self, results: List[Any]) -> None:
-        tiles = metrics_from_case_results(results)
+        cfg = self.last_working_cfg or self.base_cfg
+        tiles = metrics_from_case_results(results, cfg)
         for caption, (val, case_lbl, tone) in tiles.items():
             if caption not in self._metric_vars:
                 continue
@@ -918,7 +1031,10 @@ class SizerGUI:
         self._update_pdf_button_state()
 
     def _update_pdf_button_state(self) -> None:
-        if self._sizing_active or self._sizing_pending:
+        waiting_for_current = self._sizing_pending or (
+            self._sizing_inflight > 0 and self._last_display_generation != self._sizing_generation
+        )
+        if waiting_for_current:
             self.pdf_btn.configure(state=tk.DISABLED)
         elif self._results_fresh and self.last_working_cfg is not None:
             self.pdf_btn.configure(state=tk.NORMAL)
@@ -1087,8 +1203,13 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
-    SizerGUI(root)
-    root.mainloop()
+    app = SizerGUI(root)
+    try:
+        root.mainloop()
+    finally:
+        if not app._shutting_down:
+            app._request_close()
+        os._exit(0)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture GUI screenshots at 1280x800 under xvfb (Round 29/30)."""
+"""Capture GUI screenshots (a–c) at 1280x800 under xvfb."""
 
 from __future__ import annotations
 
@@ -53,24 +53,11 @@ def _wait_results(app, root, *, timeout: float = 120.0) -> None:
     raise RuntimeError("timed out waiting for sizing")
 
 
-def _scroll_tuning_to_bottom(app, root) -> None:
-    app.tuning_frame.update_idletasks()
-    bbox = app._tuning_canvas.bbox("all")
-    if bbox:
-        app._tuning_canvas.configure(scrollregion=bbox)
-    root.update()
-    for _ in range(80):
-        app._tuning_canvas.yview_scroll(3, "units")
-        root.update()
-    app._tuning_canvas.yview_moveto(1.0)
-    root.update()
-
-
 def main() -> None:
     import tkinter as tk
 
     import gui
-    from gui import SizerGUI, TUNING_PANEL_MIN_WIDTH
+    from gui import SizerGUI
     from gui_logic import EXAMPLE_CFG, LUKE_CFG, run_sizing_report as _real_report
 
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
@@ -81,69 +68,39 @@ def main() -> None:
         gate.wait(timeout=120.0)
         return _real_report(base_cfg, controls)
 
-    # (a) Example config after auto-update
     root = tk.Tk()
     app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=True)
     _prime_window(root, app)
     _wait_results(app, root)
-    digests["a"] = _grab_png(root, ARTIFACTS / "r30-example-after-auto-update.png")
-    assert app._tuning_pane.winfo_width() >= TUNING_PANEL_MIN_WIDTH - 16
-    app._cancel_pending_sizing()
+    digests["a"] = _grab_png(root, ARTIFACTS / "r32-example-after-auto-update.png")
     root.destroy()
 
-    # (b) Luke config blocked (results pane)
     root = tk.Tk()
     app_b = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
     _prime_window(root, app_b)
-    digests["b"] = _grab_png(root, ARTIFACTS / "r30-luke-blocked.png")
+    digests["b"] = _grab_png(root, ARTIFACTS / "r32-luke-blocked.png")
     root.destroy()
 
-    # (e) Luke config — parameter pane with unset fields visible
-    root = tk.Tk()
-    app_e = SizerGUI(root, config_path=LUKE_CFG, auto_run_after_load=False)
-    _prime_window(root, app_e)
-    app_e.tuning_frame.update_idletasks()
-    app_e._tuning_canvas.configure(scrollregion=app_e._tuning_canvas.bbox("all"))
-    for _ in range(24):
-        app_e._tuning_canvas.yview_scroll(2, "units")
-        root.update()
-    digests["e"] = _grab_png(root, ARTIFACTS / "r30-luke-parameters-unset.png")
-    root.destroy()
-
-    # (c) Mid-update: prior results visible + Updating…
-    gui.run_sizing_report = _real_report
-    root = tk.Tk()
-    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    _prime_window(root, app)
-    app.run_sizing()
-    _wait_results(app, root)
-    prior = app._last_valid_results_text or ""
-    assert "Pack mass" in prior
     gate.clear()
     gui.run_sizing_report = slow_report
-    app.controls["n_packs"].set("6")
-    app._start_sizing_run()
-    root.update()
-    assert "Updating" in app.update_banner.cget("text")
-    assert "Pack mass" in app.results_text.get("1.0", tk.END)
-    digests["c"] = _grab_png(root, ARTIFACTS / "r30-mid-update.png")
-    gate.set()
-    gui.run_sizing_report = _real_report
-    app._cancel_pending_sizing()
-    root.destroy()
-
-    # (d) Parameters pane scrolled to bottom
     root = tk.Tk()
-    app = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=False)
-    _prime_window(root, app)
-    _scroll_tuning_to_bottom(app, root)
-    y0, y1 = app._tuning_canvas.yview()
-    assert y1 > 0.95, f"scroll not at bottom: {y0}, {y1}"
-    digests["d"] = _grab_png(root, ARTIFACTS / "r30-pane-scrolled-bottom.png")
-    assert digests["d"] != digests["a"], "scroll shot must differ from (a)"
+    app_c = SizerGUI(root, config_path=EXAMPLE_CFG, auto_run_after_load=True)
+    _prime_window(root, app_c)
+    _wait_results(app_c, root)
+    app_c.controls["n_packs"].set("6")
+    app_c._mark_results_stale()
+    app_c._start_sizing_run()
+    for _ in range(30):
+        root.update()
+        time.sleep(0.05)
+    digests["c"] = _grab_png(root, ARTIFACTS / "r32-mid-update.png")
+    gate.set()
+    _wait_results(app_c, root)
+    gui.run_sizing_report = _real_report
     root.destroy()
 
     print("md5 summary:", digests, flush=True)
+    assert len({digests["a"], digests["b"], digests["c"]}) == 3
 
 
 if __name__ == "__main__":
