@@ -919,7 +919,7 @@ class SizerGUI:
     def _build_tuning_controls(self) -> None:
         self._pane_heading_label = ttk.Label(
             self.tuning_frame,
-            text="Parameters — sizing updates after slider release or typing pause",
+            text="Parameters",
             style="Header.TLabel",
             wraplength=TUNING_PANEL_MIN_WIDTH - 32,
         )
